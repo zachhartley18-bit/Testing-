@@ -76,19 +76,19 @@ jobs:
 
           test -d "$MC3_WORK/tools/SDL2-2.32.10"
 
-      - name: Download game image
-        shell: bash
-        env:
-          GDRIVE_FILE_ID: "1Eql0Jl38mS8PuYSkc0EWIsuKhLr2bZdU"
-        run: |
-          set -euo pipefail
+            - name: Download Namco Museum XISO from Google Drive
+      run: |
+          mkdir -p "$RUNNER_TEMP/namco/input" "$RUNNER_TEMP/namco/game"
 
-          "$MC3_WORK/venv/bin/python3" -m gdown \
-            "$GDRIVE_FILE_ID" \
-            -O "$RUNNER_TEMP/mc3-remix.iso"
+          python -m pip install --upgrade gdown
 
-          test -s "$RUNNER_TEMP/mc3-remix.iso"
-          file "$RUNNER_TEMP/mc3-remix.iso"
+          gdown "https://drive.google.com/uc?id=1mHlZ2hqkAexh89G46LNB0dpdgH2MaO11" \
+            -O "$RUNNER_TEMP/namco/input/namco-museum.xiso.iso"
+
+          test -s "$RUNNER_TEMP/namco/input/namco-museum.xiso.iso"
+
+          echo "Download successful:"
+          ls -lh "$RUNNER_TEMP/namco/input/namco-museum.xiso.iso"
 
       - name: Extract game files
         working-directory: ${{ env.SOURCE_DIR }}
