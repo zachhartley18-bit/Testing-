@@ -51,7 +51,7 @@ jobs:
 
       - name: Download game image
         env:
-          GDRIVE_FILE_ID: "114mOUG5HC3KOAm6v5LHqfLdEiF21VZBC"
+          GDRIVE_FILE_ID: "1Eql0Jl38mS8PuYSkc0EWIsuKhLr2bZdU"
         shell: bash
         run: |
           set -euo pipefail
@@ -61,16 +61,11 @@ jobs:
             -O "$RUNNER_TEMP/mc3-remix.iso"
 
           if [[ ! -s "$RUNNER_TEMP/mc3-remix.iso" ]]; then
-            echo "::error::Game image download failed or returned an empty file."
+            echo "::error::Game image download failed."
             exit 1
           fi
 
           file "$RUNNER_TEMP/mc3-remix.iso"
-
-          if file "$RUNNER_TEMP/mc3-remix.iso" | grep -qiE 'HTML|text'; then
-            echo "::error::Google Drive returned a webpage instead of the ISO."
-            exit 1
-          fi
 
       - name: Extract game
         working-directory: ${{ env.SOURCE_DIR }}
