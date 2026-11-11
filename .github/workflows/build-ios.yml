@@ -1,1 +1,159 @@
+name: Build Midnight Club 3 Remix iOS IPA (unsigned)
 
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build-ios.yml"
+      - "mcdub3-nx-ios-v1.1.0.zip"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mc3-remix-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-ios:
+    # Use an Apple Silicon macOS runner with Xcode installed.
+    runs-on: macos-26
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out private repository
+        uses: actions/checkout@v4
+
+      - name: Locate and unpack project source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP_PATH="mcdub3-nx-ios-v1.1.0.zip"
+          if [[ ! -f "$ZIP_PATH" ]]; then
+            echo "::error::Expected $ZIP_PATH in the repository root."
+            echo "Upload the v1.1.0 source ZIP to the root of this repository."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/mc3-source"
+          unzip -q "$ZIP_PATH" -d "$RUNNER_TEMP/mc3-source"
+          SOURCE_DIR="$RUNNER_TEMP/mc3-source/mcdub3-nx-ios-v1.1.0"
+          test -f "$SOURCE_DIR/Makefile"
+          echo "SOURCE_DIR=$SOURCE_DIR" >> "$GITHUB_ENV"
+
+      - name: Select and verify Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcodebuild -showsdks
+          XCODE_MAJOR="$(xcodebuild -version | awk '/Xcode/ {split($2,v,"."); print v[1]}')"
+          if [[ "$XCODE_MAJOR" -lt 27 ]]; then
+            echo "::error::This source README specifies Xcode 27. The selected runner Xcode is older."
+            exit 1
+          fi
+          sudo xcodebuild -license accept
+
+      - name: Install native build tools
+        run: |
+          brew install cmake ninja xcodegen
+          python3 -m venv "$RUNNER_TEMP/mc3-python"
+          "$RUNNER_TEMP/mc3-python/bin/python" -m pip install --upgrade pip capstone pillow
+          echo "$RUNNER_TEMP/mc3-python/bin" >> "$GITHUB_PATH"
+
+      - name: Download SDL2 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$SOURCE_DIR/work-dub/tools"
+          curl --fail --location --retry 3 \
+            https://www.libsdl.org/release/SDL2-2.32.10.tar.gz \
+            -o "$RUNNER_TEMP/SDL2-2.32.10.tar.gz"
+          tar -xzf "$RUNNER_TEMP/SDL2-2.32.10.tar.gz" \
+            -C "$SOURCE_DIR/work-dub/tools"
+
+      - name: Download personal game disc image from Google Drive
+        shell: bash
+        env:
+          GDRIVE_FILE_ID: "114mOUG5HC3KOAm6v5LHqfLdEiF21VZBC"
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet gdown
+          gdown --fuzzy \
+            "https://drive.google.com/file/d/${GDRIVE_FILE_ID}/view" \
+            -O "$RUNNER_TEMP/mc3-remix.iso"
+          if [[ ! -s "$RUNNER_TEMP/mc3-remix.iso" ]]; then
+            echo "::error::Google Drive download was empty."
+            exit 1
+          fi
+          file "$RUNNER_TEMP/mc3-remix.iso"
+          if file "$RUNNER_TEMP/mc3-remix.iso" | grep -qiE 'HTML|text'; then
+            echo "::error::Google Drive returned a web page, not the disc image. Check link sharing or Drive download limits."
+            exit 1
+          fi
+
+      - name: Extract Remix disc
+        working-directory: ${{ env.SOURCE_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          make extract GAME=remix ISO="$RUNNER_TEMP/mc3-remix.iso"
+          test -f game-remix/default.xbe
+          rm -f "$RUNNER_TEMP/mc3-remix.iso"
+
+      - name: Lift Xbox executable to native C
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: make lift GAME=remix
+
+      - name: Build unsigned ARM64 iOS app
+        working-directory: ${{ env.SOURCE_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The user will sign the IPA on-device with Feather. Disable only
+          # Xcode's signing step; do not remove the app's entitlement plist.
+          export MC3_XCODEBUILD_ARGS="CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="
+          make ios GAME=remix
+
+      - name: Package unsigned IPA
+        working-directory: ${{ env.SOURCE_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="work-remix/ios/iphoneos/Midnight Club 3 Remix.app"
+          if [[ ! -d "$APP_PATH" ]]; then
+            echo "::error::Expected app bundle was not produced: $APP_PATH"
+            find work-remix/ios -maxdepth 4 -print || true
+            exit 1
+          fi
+
+          # Verify that the extended-memory entitlement declarations survived
+          # Xcode project generation and app packaging.
+          ENTITLEMENTS="ios/App/MidnightClub3.entitlements"
+          test -f "$ENTITLEMENTS"
+          /usr/libexec/PlistBuddy -c \
+            'Print :com.apple.developer.kernel.extended-virtual-addressing' \
+            "$ENTITLEMENTS"
+          /usr/libexec/PlistBuddy -c \
+            'Print :com.apple.developer.kernel.increased-memory-limit' \
+            "$ENTITLEMENTS"
+
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          ditto "$APP_PATH" "$RUNNER_TEMP/ipa/Payload/Midnight Club 3 Remix.app"
+          (cd "$RUNNER_TEMP/ipa" && /usr/bin/zip -qry \
+            "$GITHUB_WORKSPACE/Midnight-Club-3-Remix-unsigned.ipa" Payload)
+
+          test -s "$GITHUB_WORKSPACE/Midnight-Club-3-Remix-unsigned.ipa"
+          echo "Created unsigned IPA:"
+          ls -lh "$GITHUB_WORKSPACE/Midnight-Club-3-Remix-unsigned.ipa"
+
+      - name: Upload IPA and build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Midnight-Club-3-Remix-iOS-unsigned
+          path: |
+            Midnight-Club-3-Remix-unsigned.ipa
+            ${{ env.SOURCE_DIR }}/work-remix/logs/
+          if-no-files-found: warn
+          retention-days: 7
