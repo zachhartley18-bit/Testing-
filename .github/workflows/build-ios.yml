@@ -49,14 +49,22 @@ jobs:
             -o "$RUNNER_TEMP/SDL2.tar.gz"
           tar -xzf "$RUNNER_TEMP/SDL2.tar.gz" -C "$MC3_WORK/tools"
 
-      - name: Download game image
+        - name: Download game image
         env:
           GDRIVE_FILE_ID: "114mOUG5HC3KOAm6v5LHqfLdEiF21VZBC"
+        shell: bash
         run: |
-          gdown --fuzzy \
+          set -euo pipefail
+
+          "$MC3_WORK/venv/bin/python3" -m gdown --fuzzy \
             "https://drive.google.com/file/d/${GDRIVE_FILE_ID}/view" \
             -O "$RUNNER_TEMP/mc3-remix.iso"
-          test -s "$RUNNER_TEMP/mc3-remix.iso"
+
+          if [[ ! -s "$RUNNER_TEMP/mc3-remix.iso" ]]; then
+            echo "::error::Game image download failed or returned an empty file."
+            exit 1
+          fi
+
           file "$RUNNER_TEMP/mc3-remix.iso"
 
       - name: Extract game
