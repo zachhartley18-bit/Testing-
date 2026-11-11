@@ -1,14 +1,19 @@
-name: Build Midnight Club 3 RMX iOS IPA (unsigned)
+name: Build Self-Contained Midnight Club 3 Remix IPA
 
 on:
   workflow_dispatch:
   push:
     paths:
       - ".github/workflows/build-ios.yml"
+      - "mc3-self-contained-ipa.patch"
       - "mcdub3-nx-ios-v1.1.0.zip"
 
 permissions:
   contents: read
+
+concurrency:
+  group: mc3-remix-ios-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-ios:
@@ -20,39 +25,61 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Extract project
+        shell: bash
         run: |
           set -euo pipefail
+
           mkdir -p "$RUNNER_TEMP/mc3-source"
-          unzip -q mcdub3-nx-ios-v1.1.0.zip -d "$RUNNER_TEMP/mc3-source"
+          unzip -q mcdub3-nx-ios-v1.1.0.zip \
+            -d "$RUNNER_TEMP/mc3-source"
+
           SOURCE_DIR="$RUNNER_TEMP/mc3-source/mcdub3-nx-ios-v1.1.0"
+
           test -f "$SOURCE_DIR/Makefile"
+
           echo "SOURCE_DIR=$SOURCE_DIR" >> "$GITHUB_ENV"
           echo "MC3_WORK=$SOURCE_DIR/work-remix" >> "$GITHUB_ENV"
 
       - name: Verify Xcode
+        shell: bash
         run: |
+          set -euo pipefail
           xcodebuild -version
           sudo xcodebuild -license accept
 
       - name: Install dependencies
+        shell: bash
         run: |
+          set -euo pipefail
+
           brew install cmake ninja xcodegen
+
           python3 -m venv "$MC3_WORK/venv"
           "$MC3_WORK/venv/bin/python3" -m pip install --upgrade pip
           "$MC3_WORK/venv/bin/python3" -m pip install capstone pillow gdown
 
+          echo "$MC3_WORK/venv/bin" >> "$GITHUB_PATH"
+
       - name: Download SDL2
+        shell: bash
         run: |
+          set -euo pipefail
+
           mkdir -p "$MC3_WORK/tools"
-          curl -L --fail \
+
+          curl --fail --location --retry 3 \
             https://www.libsdl.org/release/SDL2-2.32.10.tar.gz \
             -o "$RUNNER_TEMP/SDL2.tar.gz"
-          tar -xzf "$RUNNER_TEMP/SDL2.tar.gz" -C "$MC3_WORK/tools"
+
+          tar -xzf "$RUNNER_TEMP/SDL2.tar.gz" \
+            -C "$MC3_WORK/tools"
+
+          test -d "$MC3_WORK/tools/SDL2-2.32.10"
 
       - name: Download game image
+        shell: bash
         env:
           GDRIVE_FILE_ID: "1Eql0Jl38mS8PuYSkc0EWIsuKhLr2bZdU"
-        shell: bash
         run: |
           set -euo pipefail
 
@@ -60,14 +87,10 @@ jobs:
             "$GDRIVE_FILE_ID" \
             -O "$RUNNER_TEMP/mc3-remix.iso"
 
-          if [[ ! -s "$RUNNER_TEMP/mc3-remix.iso" ]]; then
-            echo "::error::Game image download failed."
-            exit 1
-          fi
-
+          test -s "$RUNNER_TEMP/mc3-remix.iso"
           file "$RUNNER_TEMP/mc3-remix.iso"
 
-      - name: Extract game
+      - name: Extract game files
         working-directory: ${{ env.SOURCE_DIR }}
         shell: bash
         run: |
@@ -75,41 +98,44 @@ jobs:
 
           make GAME=remix extract ISO="$RUNNER_TEMP/mc3-remix.iso"
 
-          if [[ ! -f game-remix/default.xbe ]]; then
-            echo "::error::Extraction completed, but game-remix/default.xbe was not found."
-            find game-remix -maxdepth 3 -type f | head -50 || true
-            exit 1
-          fi
+          test -f game-remix/default.xbe
 
-      - name: Configure lifter for North American disc
-        working-directory: ${{ env.SOURCE_DIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
+          echo "Extracted game:"
+          du -sh game-remix
+          ls -lh game-remix/default.xbe
 
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
+          rm -f "$RUNNER_TEMP/mc3-remix.iso"
 
-          path = Path("config/remix/edition_variants.json")
-          data = json.loads(path.read_text())
-
-          # Use the actual branch instructions from the North American XBE.
-          # Disable the European-base edition override.
-          data["variants"] = {}
-          data["jcc"] = []
-
-          path.write_text(json.dumps(data, indent=2) + "\n")
-          print("Configured lifter to use the North American XBE directly.")
-          PY
-
-      - name: Lift Xbox executable into native C
+      - name: Lift Xbox executable
         working-directory: ${{ env.SOURCE_DIR }}
         shell: bash
         run: |
           set -euo pipefail
           make lift GAME=remix
-            
+
+      - name: Apply self-contained IPA patch
+        working-directory: ${{ env.SOURCE_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PATCH="$GITHUB_WORKSPACE/mc3-self-contained-ipa.patch"
+
+          test -f "$PATCH"
+
+          # Normalize the patch's source-archive-prefixed paths.
+          sed \
+            -e 's|a/mcdub3-nx-ios-v1.1.0/|a/|g' \
+            "$PATCH" > "$RUNNER_TEMP/mc3-normalized.patch"
+
+          patch --batch --forward -p1 \
+            < "$RUNNER_TEMP/mc3-normalized.patch"
+
+          grep -q "install_bundled_disc();" ios/App/Welcome.m
+          grep -q "MC3_GAME_DIR" tools/ios_build.sh
+
+          echo "Self-contained IPA patch applied and verified."
+
       - name: Build unsigned ARM64 iOS app
         working-directory: ${{ env.SOURCE_DIR }}
         shell: bash
@@ -124,9 +150,28 @@ jobs:
           EOF
 
           export MC3_SDL_DIR="$MC3_WORK/tools/SDL2-2.32.10"
+          export MC3_GAME_DIR="$SOURCE_DIR/game-remix"
+
           export MC3_XCODEBUILD_ARGS="CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="
 
+          test -f "$MC3_GAME_DIR/default.xbe"
+
           make ios GAME=remix
+
+      - name: Verify bundled game data
+        working-directory: ${{ env.SOURCE_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_PATH="$MC3_WORK/ios/iphoneos/Midnight Club 3 Remix.app"
+
+          test -d "$APP_PATH"
+          test -f "$APP_PATH/GameData/default.xbe"
+
+          echo "Bundled game data verified:"
+          du -sh "$APP_PATH/GameData"
+          ls -lh "$APP_PATH/GameData/default.xbe"
 
       - name: Package unsigned IPA
         working-directory: ${{ env.SOURCE_DIR }}
@@ -134,32 +179,32 @@ jobs:
         run: |
           set -euo pipefail
 
-          APP_PATH="$(find "$MC3_WORK/ios" -type d -name '*.app' -path '*/iphoneos/*' -print -quit)"
-
-          if [[ -z "$APP_PATH" ]]; then
-            echo "::error::No compiled iOS app bundle was found."
-            find "$MC3_WORK/ios" -maxdepth 6 -print || true
-            exit 1
-          fi
+          APP_PATH="$MC3_WORK/ios/iphoneos/Midnight Club 3 Remix.app"
 
           mkdir -p "$RUNNER_TEMP/ipa/Payload"
 
-          ditto "$APP_PATH" "$RUNNER_TEMP/ipa/Payload/$(basename "$APP_PATH")"
+          ditto "$APP_PATH" \
+            "$RUNNER_TEMP/ipa/Payload/Midnight Club 3 Remix.app"
 
           (
             cd "$RUNNER_TEMP/ipa"
             /usr/bin/zip -qry \
-              "$GITHUB_WORKSPACE/Midnight-Club-3-Remix-unsigned.ipa" Payload
+              "$GITHUB_WORKSPACE/Midnight-Club-3-Remix-unsigned.ipa" \
+              Payload
           )
 
           test -s "$GITHUB_WORKSPACE/Midnight-Club-3-Remix-unsigned.ipa"
 
+          echo "IPA created:"
           ls -lh "$GITHUB_WORKSPACE/Midnight-Club-3-Remix-unsigned.ipa"
 
-      - name: Upload unsigned IPA artifact
+      - name: Upload IPA and build logs
+        if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: Midnight-Club-3-Remix-iOS-unsigned
-          path: Midnight-Club-3-Remix-unsigned.ipa
-          if-no-files-found: error
+          name: Midnight-Club-3-Remix-Self-Contained-IPA
+          path: |
+            Midnight-Club-3-Remix-unsigned.ipa
+            ${{ env.SOURCE_DIR }}/work-remix/logs/
+          if-no-files-found: warn
           retention-days: 7
