@@ -1,0 +1,107 @@
+name: Namco Museum - Xbox Recompilation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recompile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install capstone gdown
+
+      - name: Build extract-xiso
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential
+          git clone --depth 1 https://github.com/XboxDev/extract-xiso.git "$RUNNER_TEMP/extract-xiso"
+          cmake -S "$RUNNER_TEMP/extract-xiso" -B "$RUNNER_TEMP/extract-xiso/build"
+          cmake --build "$RUNNER_TEMP/extract-xiso/build" --parallel 2
+          test -x "$RUNNER_TEMP/extract-xiso/build/extract-xiso"
+
+      - name: Download Namco Museum XISO from Google Drive
+        run: |
+          mkdir -p "$RUNNER_TEMP/namco/input" "$RUNNER_TEMP/namco/game"
+          gdown --fuzzy "https://drive.google.com/file/d/1mHlZ2hqkAexh89G46LNB0dpdgH2MaO11/view?usp=drivesdk" \
+            -O "$RUNNER_TEMP/namco/input/namco-museum.xiso.iso"
+          test -s "$RUNNER_TEMP/namco/input/namco-museum.xiso.iso"
+          ls -lh "$RUNNER_TEMP/namco/input/namco-museum.xiso.iso"
+
+      - name: Clone XboxRecomp
+        run: |
+          git clone --depth 1 https://github.com/sp00nznet/xboxrecomp.git "$RUNNER_TEMP/xboxrecomp"
+          git -C "$RUNNER_TEMP/xboxrecomp" rev-parse HEAD | tee "$RUNNER_TEMP/namco/xboxrecomp-commit.txt"
+
+      - name: Extract XISO
+        run: |
+          "$RUNNER_TEMP/extract-xiso/build/extract-xiso" \
+            "$RUNNER_TEMP/namco/input/namco-museum.xiso.iso" \
+            -d "$RUNNER_TEMP/namco/game"
+          echo "Extracted files:"
+          find "$RUNNER_TEMP/namco/game" -maxdepth 3 -type f | head -200
+          XBE_PATH="$(find "$RUNNER_TEMP/namco/game" -type f -iname default.xbe -print -quit)"
+          if [ -z "$XBE_PATH" ]; then
+            echo "::error::default.xbe was not found in the extracted XISO."
+            exit 1
+          fi
+          echo "XBE_PATH=$XBE_PATH" >> "$GITHUB_ENV"
+          echo "Found executable: $XBE_PATH"
+
+      - name: Parse XBE
+        working-directory: ${{ runner.temp }}/xboxrecomp
+        run: |
+          python -m tools.xbe_parser "$XBE_PATH" \
+            --json "$RUNNER_TEMP/namco/namco_analysis.json"
+
+      - name: Disassemble XBE
+        working-directory: ${{ runner.temp }}/xboxrecomp
+        run: |
+          python -m tools.disasm "$XBE_PATH" --text-only -v
+
+      - name: Identify library functions
+        working-directory: ${{ runner.temp }}/xboxrecomp
+        run: |
+          python -m tools.func_id "$XBE_PATH" -v
+
+      - name: Recover calling conventions
+        working-directory: ${{ runner.temp }}/xboxrecomp
+        run: |
+          python -m tools.abi_analysis "$XBE_PATH" -v
+
+      - name: Recompile XBE into C source
+        working-directory: ${{ runner.temp }}/xboxrecomp
+        run: |
+          mkdir -p "$RUNNER_TEMP/namco/generated"
+          python -m tools.recomp "$XBE_PATH" --all --split 250 \
+            --gen-dir "$RUNNER_TEMP/namco/generated"
+          test -f "$RUNNER_TEMP/namco/generated/recomp_funcs.h"
+          echo "Generated C source files:"
+          find "$RUNNER_TEMP/namco/generated" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
+
+      - name: Upload analysis and generated source
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: namco-museum-xboxrecomp-results
+          path: |
+            ${{ runner.temp }}/namco/
+            ${{ runner.temp }}/xboxrecomp/tools/disasm/output/
+            ${{ runner.temp }}/xboxrecomp/tools/func_id/output/
+            ${{ runner.temp }}/xboxrecomp/tools/abi_analysis/output/
+          if-no-files-found: warn
+          retention-days: 7
