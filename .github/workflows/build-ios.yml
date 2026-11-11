@@ -56,8 +56,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          "$MC3_WORK/venv/bin/python3" -m gdown --fuzzy \
-            "https://drive.google.com/file/d/${GDRIVE_FILE_ID}/view" \
+          "$MC3_WORK/venv/bin/python3" -m gdown \
+            "$GDRIVE_FILE_ID" \
             -O "$RUNNER_TEMP/mc3-remix.iso"
 
           if [[ ! -s "$RUNNER_TEMP/mc3-remix.iso" ]]; then
@@ -66,6 +66,11 @@ jobs:
           fi
 
           file "$RUNNER_TEMP/mc3-remix.iso"
+
+          if file "$RUNNER_TEMP/mc3-remix.iso" | grep -qiE 'HTML|text'; then
+            echo "::error::Google Drive returned a webpage instead of the ISO."
+            exit 1
+          fi
 
       - name: Extract game
         working-directory: ${{ env.SOURCE_DIR }}
