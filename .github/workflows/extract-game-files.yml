@@ -15,7 +15,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract project
+      - name: Extract project archive
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -24,39 +25,71 @@ jobs:
           unzip -q mcdub3-nx-ios-v1.1.0.zip \
             -d "$RUNNER_TEMP/mc3-source"
 
-          echo "SOURCE_DIR=$RUNNER_TEMP/mc3-source/mcdub3-nx-ios-v1.1.0" >> "$GITHUB_ENV"
+          SOURCE_DIR="$RUNNER_TEMP/mc3-source/mcdub3-nx-ios-v1.1.0"
+
+          if [[ ! -f "$SOURCE_DIR/Makefile" ]]; then
+            echo "::error::Project Makefile was not found."
+            exit 1
+          fi
+
+          echo "SOURCE_DIR=$SOURCE_DIR" >> "$GITHUB_ENV"
 
       - name: Install extraction dependencies
+        shell: bash
         run: |
-          brew install python
-          python3 -m pip install --user gdown
+          set -euo pipefail
+
+          python3 -m venv "$RUNNER_TEMP/mc3-venv"
+
+          "$RUNNER_TEMP/mc3-venv/bin/python3" -m pip install --upgrade pip
+          "$RUNNER_TEMP/mc3-venv/bin/python3" -m pip install gdown
+
+          echo "GDOWN_PYTHON=$RUNNER_TEMP/mc3-venv/bin/python3" >> "$GITHUB_ENV"
 
       - name: Download game ISO
         env:
           GDRIVE_FILE_ID: "1Eql0Jl38mS8PuYSkc0EWIsuKhLr2bZdU"
+        shell: bash
         run: |
           set -euo pipefail
 
-          python3 -m gdown "$GDRIVE_FILE_ID" \
+          "$GDOWN_PYTHON" -m gdown "$GDRIVE_FILE_ID" \
             -O "$RUNNER_TEMP/mc3-remix.iso"
 
-          test -s "$RUNNER_TEMP/mc3-remix.iso"
+          if [[ ! -s "$RUNNER_TEMP/mc3-remix.iso" ]]; then
+            echo "::error::Google Drive download failed."
+            exit 1
+          fi
+
+          file "$RUNNER_TEMP/mc3-remix.iso"
+          ls -lh "$RUNNER_TEMP/mc3-remix.iso"
 
       - name: Extract game files
         working-directory: ${{ env.SOURCE_DIR }}
+        shell: bash
         run: |
           set -euo pipefail
 
           make GAME=remix extract ISO="$RUNNER_TEMP/mc3-remix.iso"
 
-          test -f game-remix/default.xbe
+          if [[ ! -f game-remix/default.xbe ]]; then
+            echo "::error::Extraction failed: game-remix/default.xbe was not found."
 
-          echo "Extracted game files:"
+            find game-remix -maxdepth 3 -type f | head -50 || true
+
+            exit 1
+          fi
+
+          echo "Game extraction successful."
+          echo "Game directory size:"
           du -sh game-remix
-          find game-remix -maxdepth 2 -type f | head -30
 
-      - name: Package extracted game files
+          echo "Main executable:"
+          ls -lh game-remix/default.xbe
+
+      - name: Package extracted game directory
         working-directory: ${{ env.SOURCE_DIR }}
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -64,6 +97,12 @@ jobs:
             game-remix \
             "$GITHUB_WORKSPACE/Midnight-Club-3-Remix-Game-Files.zip"
 
+          if [[ ! -s "$GITHUB_WORKSPACE/Midnight-Club-3-Remix-Game-Files.zip" ]]; then
+            echo "::error::Game files ZIP was not created."
+            exit 1
+          fi
+
+          echo "Created game files archive:"
           ls -lh "$GITHUB_WORKSPACE/Midnight-Club-3-Remix-Game-Files.zip"
 
       - name: Upload extracted game files
