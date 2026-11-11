@@ -109,6 +109,7 @@ jobs:
         run: |
           set -euo pipefail
           make lift GAME=remix
+            
       - name: Build unsigned ARM64 iOS app
         working-directory: ${{ env.SOURCE_DIR }}
         shell: bash
@@ -122,6 +123,7 @@ jobs:
           MC3_BUNDLE_PREFIX = com.example
           EOF
 
+          export MC3_SDL_DIR="$MC3_WORK/tools/SDL2-2.32.10"
           export MC3_XCODEBUILD_ARGS="CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="
 
           make ios GAME=remix
