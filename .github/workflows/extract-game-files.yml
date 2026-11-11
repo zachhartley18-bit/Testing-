@@ -34,17 +34,29 @@ jobs:
 
           echo "SOURCE_DIR=$SOURCE_DIR" >> "$GITHUB_ENV"
 
-      - name: Install extraction dependencies
+      - name: Install Python dependencies
         shell: bash
         run: |
           set -euo pipefail
 
+          # Separate environment for Google Drive downloads.
           python3 -m venv "$RUNNER_TEMP/mc3-venv"
 
           "$RUNNER_TEMP/mc3-venv/bin/python3" -m pip install --upgrade pip
           "$RUNNER_TEMP/mc3-venv/bin/python3" -m pip install gdown
 
           echo "GDOWN_PYTHON=$RUNNER_TEMP/mc3-venv/bin/python3" >> "$GITHUB_ENV"
+
+          # Project environment for Xbox executable extraction.
+          mkdir -p "$SOURCE_DIR/work-remix"
+
+          python3 -m venv "$SOURCE_DIR/work-remix/macvenv"
+
+          "$SOURCE_DIR/work-remix/macvenv/bin/python3" -m pip install --upgrade pip
+          "$SOURCE_DIR/work-remix/macvenv/bin/python3" -m pip install capstone pillow
+
+          # Verify Capstone is available.
+          "$SOURCE_DIR/work-remix/macvenv/bin/python3" -c "import capstone; print('Capstone installed successfully:', capstone.__version__)"
 
       - name: Download game ISO
         env:
@@ -73,7 +85,7 @@ jobs:
           make GAME=remix extract ISO="$RUNNER_TEMP/mc3-remix.iso"
 
           if [[ ! -f game-remix/default.xbe ]]; then
-            echo "::error::Extraction failed: game-remix/default.xbe was not found."
+            echo "::error::Extraction failed: default.xbe was not found."
 
             find game-remix -maxdepth 3 -type f | head -50 || true
 
@@ -81,7 +93,6 @@ jobs:
           fi
 
           echo "Game extraction successful."
-          echo "Game directory size:"
           du -sh game-remix
 
           echo "Main executable:"
@@ -102,7 +113,6 @@ jobs:
             exit 1
           fi
 
-          echo "Created game files archive:"
           ls -lh "$GITHUB_WORKSPACE/Midnight-Club-3-Remix-Game-Files.zip"
 
       - name: Upload extracted game files
