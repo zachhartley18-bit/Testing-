@@ -74,5 +74,14 @@ jobs:
 
       - name: Extract game
         working-directory: ${{ env.SOURCE_DIR }}
+        shell: bash
         run: |
-          make extract GAME
+          set -euo pipefail
+
+          make GAME=remix extract ISO="$RUNNER_TEMP/mc3-remix.iso"
+
+          if [[ ! -f game-remix/default.xbe ]]; then
+            echo "::error::Extraction completed, but game-remix/default.xbe was not found."
+            find game-remix -maxdepth 3 -type f | head -50 || true
+            exit 1
+          fi
