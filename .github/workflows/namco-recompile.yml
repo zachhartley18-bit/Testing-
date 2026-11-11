@@ -1,4 +1,4 @@
-name: Namco Museum - Xbox Recompilation
+name: Namco Museum - Xbox Recompilation 
 
 on:
   workflow_dispatch:
