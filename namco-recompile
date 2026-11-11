@@ -20,81 +20,139 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install capstone gdown
 
-      - name: Build extract-xiso
+      - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake build-essential
-          git clone --depth 1 https://github.com/XboxDev/extract-xiso.git "$RUNNER_TEMP/extract-xiso"
-          cmake -S "$RUNNER_TEMP/extract-xiso" -B "$RUNNER_TEMP/extract-xiso/build"
-          cmake --build "$RUNNER_TEMP/extract-xiso/build" --parallel 2
-          test -x "$RUNNER_TEMP/extract-xiso/build/extract-xiso"
 
-            - name: Download Namco Museum XISO from Google Drive
+      - name: Build extract-xiso
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/namco/input" "$RUNNER_TEMP/namco/game"
+
+          git clone --depth 1 https://github.com/XboxDev/extract-xiso.git "$RUNNER_TEMP/extract-xiso"
+
+          cmake -S "$RUNNER_TEMP/extract-xiso" -B "$RUNNER_TEMP/extract-xiso/build"
+          cmake --build "$RUNNER_TEMP/extract-xiso/build" --parallel 2
+
+          EXTRACT_XISO="$(find "$RUNNER_TEMP/extract-xiso/build" -type f -name extract-xiso -perm -111 -print -quit)"
+
+          if [ -z "$EXTRACT_XISO" ]; then
+            echo "::error::Could not locate the extract-xiso executable."
+            exit 1
+          fi
+
+          echo "EXTRACT_XISO=$EXTRACT_XISO" >> "$GITHUB_ENV"
+          "$EXTRACT_XISO" -h || true
+
+      - name: Prepare working directories
+        run: |
+          mkdir -p "$RUNNER_TEMP/namco/input"
+          mkdir -p "$RUNNER_TEMP/namco/game"
+          mkdir -p "$RUNNER_TEMP/namco/generated"
+
+      - name: Download Namco Museum XISO
+        shell: bash
+        run: |
+          set -euo pipefail
+
           gdown "https://drive.google.com/uc?id=1mHlZ2hqkAexh89G46LNB0dpdgH2MaO11" \
             -O "$RUNNER_TEMP/namco/input/namco-museum.xiso.iso"
+
           test -s "$RUNNER_TEMP/namco/input/namco-museum.xiso.iso"
+
           ls -lh "$RUNNER_TEMP/namco/input/namco-museum.xiso.iso"
 
       - name: Clone XboxRecomp
+        shell: bash
         run: |
-          git clone --depth 1 https://github.com/sp00nznet/xboxrecomp.git "$RUNNER_TEMP/xboxrecomp"
-          git -C "$RUNNER_TEMP/xboxrecomp" rev-parse HEAD | tee "$RUNNER_TEMP/namco/xboxrecomp-commit.txt"
+          set -euo pipefail
 
-      - name: Extract XISO
+          git clone --depth 1 https://github.com/sp00nznet/xboxrecomp.git "$RUNNER_TEMP/xboxrecomp"
+
+          git -C "$RUNNER_TEMP/xboxrecomp" rev-parse HEAD \
+            | tee "$RUNNER_TEMP/namco/xboxrecomp-commit.txt"
+
+      - name: Extract Namco Museum XISO
+        shell: bash
         run: |
-          "$RUNNER_TEMP/extract-xiso/build/extract-xiso" \
-            "$RUNNER_TEMP/namco/input/namco-museum.xiso.iso" \
+          set -euo pipefail
+
+          "$EXTRACT_XISO" \
+            -x "$RUNNER_TEMP/namco/input/namco-museum.xiso.iso" \
             -d "$RUNNER_TEMP/namco/game"
-          echo "Extracted files:"
-          find "$RUNNER_TEMP/namco/game" -maxdepth 3 -type f | head -200
+
+          echo "Extracted game files:"
+          find "$RUNNER_TEMP/namco/game" -maxdepth 4 -type f | head -200
+
           XBE_PATH="$(find "$RUNNER_TEMP/namco/game" -type f -iname default.xbe -print -quit)"
+
           if [ -z "$XBE_PATH" ]; then
-            echo "::error::default.xbe was not found in the extracted XISO."
+            echo "::error::default.xbe was not found in the extracted game files."
             exit 1
           fi
+
           echo "XBE_PATH=$XBE_PATH" >> "$GITHUB_ENV"
-          echo "Found executable: $XBE_PATH"
+          echo "Found Xbox executable: $XBE_PATH"
 
-      - name: Parse XBE
+      - name: Parse Xbox executable
         working-directory: ${{ runner.temp }}/xboxrecomp
+        shell: bash
         run: |
+          set -euo pipefail
+
           python -m tools.xbe_parser "$XBE_PATH" \
-            --json "$RUNNER_TEMP/namco/namco_analysis.json"
+            --json "$(dirname "$XBE_PATH")/namco_analysis.json"
 
-      - name: Disassemble XBE
+      - name: Disassemble Xbox executable
         working-directory: ${{ runner.temp }}/xboxrecomp
+        shell: bash
         run: |
+          set -euo pipefail
+
           python -m tools.disasm "$XBE_PATH" --text-only -v
 
       - name: Identify library functions
         working-directory: ${{ runner.temp }}/xboxrecomp
+        shell: bash
         run: |
+          set -euo pipefail
+
           python -m tools.func_id "$XBE_PATH" -v
 
       - name: Recover calling conventions
         working-directory: ${{ runner.temp }}/xboxrecomp
+        shell: bash
         run: |
+          set -euo pipefail
+
           python -m tools.abi_analysis "$XBE_PATH" -v
 
-      - name: Recompile XBE into C source
+      - name: Recompile Xbox executable into C
         working-directory: ${{ runner.temp }}/xboxrecomp
+        shell: bash
         run: |
-          mkdir -p "$RUNNER_TEMP/namco/generated"
-          python -m tools.recomp "$XBE_PATH" --all --split 250 \
-            --gen-dir "$RUNNER_TEMP/namco/generated"
-          test -f "$RUNNER_TEMP/namco/generated/recomp_funcs.h"
-          echo "Generated C source files:"
-          find "$RUNNER_TEMP/namco/generated" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
+          set -euo pipefail
 
-      - name: Upload analysis and generated source
+          python -m tools.recomp "$XBE_PATH" \
+            --all \
+            --split 250 \
+            --gen-dir "$RUNNER_TEMP/namco/generated"
+
+          echo "Generated files:"
+          find "$RUNNER_TEMP/namco/generated" -maxdepth 1 -type f -printf '%f (%s bytes)\n' | sort
+
+          if [ ! -f "$RUNNER_TEMP/namco/generated/recomp_funcs.h" ]; then
+            echo "::error::Expected recomp_funcs.h was not generated."
+            exit 1
+          fi
+
+      - name: Save analysis and generated source
         if: always()
         uses: actions/upload-artifact@v4
         with:
