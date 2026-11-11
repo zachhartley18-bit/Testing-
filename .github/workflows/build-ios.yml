@@ -80,3 +80,62 @@ jobs:
             find game-remix -maxdepth 3 -type f | head -50 || true
             exit 1
           fi
+
+      - name: Lift Xbox executable into native C
+        working-directory: ${{ env.SOURCE_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          make lift GAME=remix
+      - name: Build unsigned ARM64 iOS app
+        working-directory: ${{ env.SOURCE_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p ios/Config
+
+          cat > ios/Config/Local.xcconfig <<'EOF'
+          DEVELOPMENT_TEAM =
+          MC3_BUNDLE_PREFIX = com.example
+          EOF
+
+          export MC3_XCODEBUILD_ARGS="CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="
+
+          make ios GAME=remix
+
+      - name: Package unsigned IPA
+        working-directory: ${{ env.SOURCE_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_PATH="$(find "$MC3_WORK/ios" -type d -name '*.app' -path '*/iphoneos/*' -print -quit)"
+
+          if [[ -z "$APP_PATH" ]]; then
+            echo "::error::No compiled iOS app bundle was found."
+            find "$MC3_WORK/ios" -maxdepth 6 -print || true
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+
+          ditto "$APP_PATH" "$RUNNER_TEMP/ipa/Payload/$(basename "$APP_PATH")"
+
+          (
+            cd "$RUNNER_TEMP/ipa"
+            /usr/bin/zip -qry \
+              "$GITHUB_WORKSPACE/Midnight-Club-3-Remix-unsigned.ipa" Payload
+          )
+
+          test -s "$GITHUB_WORKSPACE/Midnight-Club-3-Remix-unsigned.ipa"
+
+          ls -lh "$GITHUB_WORKSPACE/Midnight-Club-3-Remix-unsigned.ipa"
+
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: Midnight-Club-3-Remix-iOS-unsigned
+          path: Midnight-Club-3-Remix-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
