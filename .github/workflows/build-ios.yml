@@ -1,4 +1,4 @@
-name: Build Midnight Club 3 Remix iOS IPA (unsigned)
+name: Build Midnight Club 3 RMX iOS IPA (unsigned)
 
 on:
   workflow_dispatch:
