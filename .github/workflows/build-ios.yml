@@ -49,7 +49,7 @@ jobs:
             -o "$RUNNER_TEMP/SDL2.tar.gz"
           tar -xzf "$RUNNER_TEMP/SDL2.tar.gz" -C "$MC3_WORK/tools"
 
-        - name: Download game image
+      - name: Download game image
         env:
           GDRIVE_FILE_ID: "114mOUG5HC3KOAm6v5LHqfLdEiF21VZBC"
         shell: bash
