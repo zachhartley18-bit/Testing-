@@ -81,6 +81,28 @@ jobs:
             exit 1
           fi
 
+      - name: Configure lifter for North American disc
+        working-directory: ${{ env.SOURCE_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("config/remix/edition_variants.json")
+          data = json.loads(path.read_text())
+
+          # Use the actual branch instructions from the North American XBE.
+          # Disable the European-base edition override.
+          data["variants"] = {}
+          data["jcc"] = []
+
+          path.write_text(json.dumps(data, indent=2) + "\n")
+          print("Configured lifter to use the North American XBE directly.")
+          PY
+
       - name: Lift Xbox executable into native C
         working-directory: ${{ env.SOURCE_DIR }}
         shell: bash
