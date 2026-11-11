@@ -1,0 +1,79 @@
+--- a/mcdub3-nx-ios-v1.1.0/ios/App/Welcome.m
++++ b/ios/App/Welcome.m
+@@ -22,6 +22,48 @@
+ 
+ static UIWindow *s_window;                      /* welcome, then loading */
+ static BOOL s_play;
++static NSString *documents(void);
++
++/* ── Bundled disc bootstrap ──────────────────────────────────────────── */
++/* The build places the user's extracted game folder in the app bundle as
++ * GameData. Copy it into Documents only when no user-installed disc exists;
++ * never overwrite a folder the player has already placed there. */
++static void install_bundled_disc(void)
++{
++    NSFileManager *fm = [NSFileManager defaultManager];
++    NSString *docs = documents();
++    NSString *destination = [docs stringByAppendingPathComponent:@"game-usa"];
++    NSString *bundleData = [[NSBundle mainBundle].resourcePath
++                            stringByAppendingPathComponent:@"GameData"];
++    NSString *xbe = [bundleData stringByAppendingPathComponent:@"default.xbe"];
++    NSString *destXbe = [destination stringByAppendingPathComponent:@"default.xbe"];
++    NSError *error = nil;
++
++    if ([fm fileExistsAtPath:destXbe]) {
++        fprintf(stderr, "[ios] existing Documents disc retained: %s\n",
++                destination.fileSystemRepresentation);
++        return;
++    }
++    if (![fm isReadableFileAtPath:xbe]) {
++        fprintf(stderr, "[ios] no bundled GameData/default.xbe; looking for a user disc\n");
++        return;
++    }
++    if ([fm fileExistsAtPath:destination]) {
++        if (![fm removeItemAtPath:destination error:&error]) {
++            fprintf(stderr, "[ios] cannot replace incomplete game-usa folder: %s\n",
++                    error.localizedDescription.UTF8String);
++            return;
++        }
++    }
++    if (![fm createDirectoryAtPath:docs withIntermediateDirectories:YES attributes:nil error:&error] ||
++        ![fm copyItemAtPath:bundleData toPath:destination error:&error]) {
++        fprintf(stderr, "[ios] bundled disc copy failed: %s\n",
++                error.localizedDescription.UTF8String);
++        return;
++    }
++    fprintf(stderr, "[ios] installed bundled disc into Documents: %s\n",
++            destination.fileSystemRepresentation);
++}
+ 
+ /* ── The disc ─────────────────────────────────────────────────────────── */
+ 
+@@ -398,6 +440,7 @@
+     __block UIWindowScene *scene = nil;
+     NSString *disc;
+     MC3WelcomeController *wc;
++    install_bundled_disc();
+     spin_until(^BOOL { return (scene = window_scene()) != nil; });
+ 
+     wc = [[MC3WelcomeController alloc] init];
+--- a/mcdub3-nx-ios-v1.1.0/tools/ios_build.sh
++++ b/tools/ios_build.sh
+@@ -100,6 +100,17 @@
+ [ -d "$app" ] || mc3_fail "no app after the build (see xcodebuild's output above)"
+ rm -rf "$build/$MC3_SHORT_NAME.app"
+ cp -R "$app" "$build/"
++# Keep the app self-contained: the extracted disc is bundled privately in
++# the .app. Welcome.m installs it into Documents/game-usa on first launch.
++if [ -n "${MC3_GAME_DIR:-}" ] && [ -f "$MC3_GAME_DIR/default.xbe" ]; then
++    mkdir -p "$build/$MC3_SHORT_NAME.app/GameData"
++    ditto "$MC3_GAME_DIR" "$build/$MC3_SHORT_NAME.app/GameData"
++    [ -f "$build/$MC3_SHORT_NAME.app/GameData/default.xbe" ] \
++        || mc3_fail "the bundled game data has no default.xbe"
++    echo "  bundled disc: $MC3_GAME_DIR -> GameData"
++else
++    mc3_fail "no extracted game folder to bundle (expected $MC3_GAME_DIR/default.xbe)"
++fi
+ echo "  app: ${build#$MC3_REPO/}/$MC3_SHORT_NAME.app"
+ [ "$step" = run ] || exit 0
+ 
