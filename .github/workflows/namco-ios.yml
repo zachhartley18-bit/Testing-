@@ -60,7 +60,30 @@ jobs:
 
           echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
           echo "Using successful recompilation run: $RUN_ID"
+          
+      - name: Diagnose source run and available artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.source.outputs.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
 
+          echo "Selected source run: $RUN_ID"
+
+          gh run view "$RUN_ID" \
+            --json databaseId,name,workflowName,status,conclusion,headBranch \
+            --jq .
+
+          echo "Artifacts attached to selected run:"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts" \
+            --jq '.artifacts[] | {
+              name: .name,
+              id: .id,
+              expired: .expired,
+              size_in_bytes: .size_in_bytes
+            }'
+            
       - name: Download existing Namco generated-C artifact
         uses: actions/download-artifact@v4
         with:
