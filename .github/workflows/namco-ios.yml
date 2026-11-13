@@ -1,1 +1,225 @@
+name: Namco Museum iOS - Runtime Preflight
 
+on:
+  workflow_dispatch:
+    inputs:
+      recompile_run_id:
+        description: "Successful namco-recompile.yml run ID (leave blank to use the latest successful run)"
+        required: false
+        type: string
+  workflow_run:
+    workflows:
+      - "Namco Museum - Xbox Recompilation"
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: namco-ios-${{ github.event.workflow_run.id || inputs.recompile_run_id || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v4
+
+      - name: Resolve source recompilation run
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_RUN_ID: ${{ inputs.recompile_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID="${EVENT_RUN_ID:-${INPUT_RUN_ID:-}}"
+
+          if [[ -z "$RUN_ID" ]]; then
+            RUN_ID="$(gh run list \
+              --workflow namco-recompile.yml \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+          fi
+
+          if [[ -z "$RUN_ID" || "$RUN_ID" == "null" ]]; then
+            echo "::error::No successful namco-recompile.yml run was found. Run it first, then rerun this workflow."
+            exit 1
+          fi
+
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Using successful recompilation run: $RUN_ID"
+
+      - name: Download existing Namco generated-C artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: namco-museum-xboxrecomp-results
+          run-id: ${{ steps.source.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/namco-artifact
+
+      - name: Validate generated sources and record runtime revision
+        id: inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/namco-artifact"
+          REPORT="$RUNNER_TEMP/namco-preflight"
+          mkdir -p "$REPORT"
+
+          echo "## Artifact inventory" | tee "$REPORT/preflight.md"
+
+          python3 - "$ROOT" "$REPORT/artifact-files.txt" <<'PY'
+          import sys
+          from pathlib import Path
+          root, output = Path(sys.argv[1]), Path(sys.argv[2])
+          rows = []
+          for path in sorted(p for p in root.rglob("*") if p.is_file()):
+              rows.append(f"{path.relative_to(root)}\\t{path.stat().st_size} bytes")
+          output.write_text("\\n".join(rows) + "\\n")
+          PY
+
+          cat "$REPORT/artifact-files.txt" | tee -a "$REPORT/preflight.md"
+
+          FUNCS="$(find "$ROOT" -name recomp_funcs.h -print -quit)"
+          TYPES="$(find "$ROOT" -name recomp_types.h -print -quit)"
+          DISPATCH="$(find "$ROOT" -name recomp_dispatch.c -print -quit)"
+          XBE="$(find "$ROOT" -iname default.xbe -print -quit)"
+          COMMIT_FILE="$(find "$ROOT" -name xboxrecomp-commit.txt -print -quit)"
+
+          for item in FUNCS TYPES DISPATCH XBE COMMIT_FILE; do
+            if [[ -z "${!item}" || ! -s "${!item}" ]]; then
+              echo "::error::Required artifact component is missing: $item"
+              exit 1
+            fi
+          done
+
+          RUNTIME_COMMIT="$(tr -d '[:space:]' < "$COMMIT_FILE")"
+
+          if [[ ! "$RUNTIME_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Invalid XboxRecomp commit recorded in artifact: $RUNTIME_COMMIT"
+            exit 1
+          fi
+
+          echo "runtime_commit=$RUNTIME_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "generated_funcs=$FUNCS" >> "$GITHUB_OUTPUT"
+          echo "generated_types=$TYPES" >> "$GITHUB_OUTPUT"
+          echo "generated_dispatch=$DISPATCH" >> "$GITHUB_OUTPUT"
+
+          {
+            echo
+            echo "### Required inputs"
+            echo "- Generated function declarations: present"
+            echo "- Generated type definitions: present"
+            echo "- Generated dispatch source: present"
+            echo "- Original XBE: present"
+            echo "- XboxRecomp generation commit: \`$RUNTIME_COMMIT\`"
+          } | tee -a "$REPORT/preflight.md"
+
+          cp "$REPORT/preflight.md" "$GITHUB_STEP_SUMMARY"
+
+      - name: Check out the exact XboxRecomp generation revision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git init "$RUNNER_TEMP/xboxrecomp"
+
+          git -C "$RUNNER_TEMP/xboxrecomp" remote add origin \
+            https://github.com/sp00nznet/xboxrecomp.git
+
+          git -C "$RUNNER_TEMP/xboxrecomp" fetch --depth 1 origin \
+            "${{ steps.inputs.outputs.runtime_commit }}"
+
+          git -C "$RUNNER_TEMP/xboxrecomp" checkout --detach FETCH_HEAD
+
+          test "$(git -C "$RUNNER_TEMP/xboxrecomp" rev-parse HEAD)" = \
+            "${{ steps.inputs.outputs.runtime_commit }}"
+
+      - name: Audit runtime platform and renderer support
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RUNTIME="$RUNNER_TEMP/xboxrecomp"
+          REPORT="$RUNNER_TEMP/namco-preflight"
+
+          {
+            echo
+            echo "## Runtime platform audit"
+            echo "- Runtime commit: \`$(git -C "$RUNTIME" rev-parse HEAD)\`"
+
+            echo "- iOS CMake branches:"
+            grep -RInE 'IOS|iOS|CMAKE_SYSTEM_NAME' \
+              "$RUNTIME/CMakeLists.txt" "$RUNTIME/src" \
+              --include='CMakeLists.txt' --include='*.cmake' || true
+
+            echo
+            echo "### Renderer implementation files"
+
+            find "$RUNTIME/src" -type f \
+              \( -iname '*metal*' -o -iname '*vulkan*' -o -iname '*gl*' -o -iname '*present*' \) \
+              -print | sort
+
+            echo
+            echo "### Generated Namco source counts"
+
+            find "$RUNNER_TEMP/namco-artifact" \
+              -type f -name 'recomp_*.c' | wc -l
+
+            echo
+            echo "### CMake renderer references"
+
+            grep -RInE 'OpenGL|OpenGLES|Metal|Vulkan|nv2a_gl|nv2a_vk' \
+              "$RUNTIME/CMakeLists.txt" "$RUNTIME/src" \
+              --include='CMakeLists.txt' --include='*.cmake' || true
+
+          } | tee "$REPORT/runtime-audit.txt" >> "$REPORT/preflight.md"
+
+          cat "$REPORT/preflight.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stop before unsupported iOS renderer assumptions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RUNTIME="$RUNNER_TEMP/xboxrecomp"
+
+          # Deliberately a preflight gate, not a fake IPA build.
+          # The selected generated-code revision must first receive
+          # a real iOS platform layer and supported NV2A/D3D8 renderer.
+
+          if find "$RUNTIME/src" -type f \
+            \( -name '*metal*' -o -name '*Metal*' \) | grep -q .; then
+
+            echo "Metal-related source exists; it still requires a compatibility and CMake integration review."
+
+          else
+
+            echo "::warning::This runtime revision has no Metal renderer sources. A UIKit/SDL shell or Metal drawable alone cannot execute the Xbox NV2A/D3D8 graphics path."
+
+          fi
+
+          echo "::notice::Generated Namco C files and their exact runtime revision have been verified. IPA compilation is intentionally gated until the iOS runtime adaptation and graphics backend are integrated."
+
+      - name: Upload preflight report and source manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: namco-ios-preflight
+          path: |
+            ${{ runner.temp }}/namco-preflight/
+            ${{ runner.temp }}/namco-artifact/namco/
+          if-no-files-found: warn
+          retention-days: 14
