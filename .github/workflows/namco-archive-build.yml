@@ -19,15 +19,14 @@ jobs:
     env:
       ARCHIVE_NAME: Testing-Namco-Merged-Source.zip
       GAME: namco
-      JOBS: '2'
+      JOBS: "2"
       MC3_XCODE_CONFIGURATION: Release
-      MC3_XCODEBUILD_ARGS: 'CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='
 
     steps:
-      - name: Set source directory
+      - name: Initialize source directory
         shell: bash
         run: |
-          echo "SOURCE_DIR=$RUNNER_TEMP/namco-source" >> "$GITHUB_ENV"
+          echo "SOURCE_DIR=$GITHUB_WORKSPACE/_namco_source" >> "$GITHUB_ENV"
 
       - name: Check out repository
         uses: actions/checkout@v4
@@ -36,20 +35,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -f "$GITHUB_WORKSPACE/$ARCHIVE_NAME" || {
-            echo "Missing $ARCHIVE_NAME at repository root." >&2
+
+          if [ ! -f "$GITHUB_WORKSPACE/$ARCHIVE_NAME" ]; then
+            echo "ERROR: $ARCHIVE_NAME not found in repository root."
             exit 1
-          }
+          fi
+
           unzip -tq "$GITHUB_WORKSPACE/$ARCHIVE_NAME"
-          echo "Archive size:"
-          du -h "$GITHUB_WORKSPACE/$ARCHIVE_NAME"
 
       - name: Extract project source
         shell: bash
         run: |
           set -euo pipefail
+
           rm -rf "$SOURCE_DIR"
           mkdir -p "$SOURCE_DIR"
+
           unzip -q "$GITHUB_WORKSPACE/$ARCHIVE_NAME" -d "$SOURCE_DIR"
 
           test -f "$SOURCE_DIR/Makefile"
@@ -57,20 +58,21 @@ jobs:
           test -f "$SOURCE_DIR/config/namco/game.env"
           test -f "$SOURCE_DIR/namco/generated/recomp_types.h"
 
-          echo "Extracted source:"
-          du -sh "$SOURCE_DIR"
+          echo "Source extraction successful."
 
-      - name: Install iOS build tools
+      - name: Install build dependencies
         shell: bash
         run: |
           set -euo pipefail
+
           brew install cmake ninja xcodegen
+
           xcodebuild -version
           cmake --version
           ninja --version
           xcodegen --version
 
-      - name: Prepare SDL2 source
+      - name: Download SDL2
         shell: bash
         run: |
           set -euo pipefail
@@ -79,15 +81,18 @@ jobs:
 
           mkdir -p "$(dirname "$SDL_DIR")"
 
-          git clone --depth 1 --branch release-2.32.10 \
-            https://github.com/libsdl-org/SDL.git "$SDL_DIR"
+          git clone --depth 1 \
+            --branch release-2.32.10 \
+            https://github.com/libsdl-org/SDL.git \
+            "$SDL_DIR"
 
           echo "MC3_SDL_DIR=$SDL_DIR" >> "$GITHUB_ENV"
 
-      - name: Validate generated Namco sources
+      - name: Validate Namco generated sources
         shell: bash
         run: |
           set -euo pipefail
+
           cd "$SOURCE_DIR"
 
           COUNT=$(find namco/generated -maxdepth 1 \
@@ -120,23 +125,26 @@ jobs:
 
           echo "Namco source validation passed."
 
-      - name: Build iOS device app
+      - name: Build iOS application
         shell: bash
         run: |
           set -euo pipefail
+
           cd "$SOURCE_DIR"
+
           make ios GAME=namco JOBS=2
 
       - name: Package unsigned IPA
         shell: bash
         run: |
           set -euo pipefail
+
           cd "$SOURCE_DIR"
 
           APP="work-namco/ios/iphoneos/Namco Museum.app"
 
           if [ ! -d "$APP" ]; then
-            echo "Expected app not found: $APP"
+            echo "Application bundle not found: $APP"
             find work-namco/ios/iphoneos -maxdepth 3 -print || true
             exit 1
           fi
@@ -148,25 +156,21 @@ jobs:
 
           ditto "$APP" "$GITHUB_WORKSPACE/Payload/Namco Museum.app"
 
-          /usr/libexec/PlistBuddy \
-            -c 'Print :CFBundleIdentifier' \
-            "$GITHUB_WORKSPACE/Payload/Namco Museum.app/Info.plist"
-
           cd "$GITHUB_WORKSPACE"
 
           zip -qry NamcoMuseum.ipa Payload
 
-          shasum -a 256 NamcoMuseum.ipa | tee NamcoMuseum.ipa.sha256
+          shasum -a 256 NamcoMuseum.ipa > NamcoMuseum.ipa.sha256
 
-      - name: Upload IPA and build diagnostics
+      - name: Upload IPA and build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: namco-museum-ipa-${{ github.run_number }}
+          name: NamcoMuseum-${{ github.run_number }}
           path: |
             NamcoMuseum.ipa
             NamcoMuseum.ipa.sha256
-            ${{ runner.temp }}/namco-source/work-namco/logs/**
-            ${{ runner.temp }}/namco-source/work-namco/ios/iphoneos/xcode/Logs/Build/**
+            _namco_source/work-namco/logs/**
+            _namco_source/work-namco/ios/iphoneos/xcode/Logs/Build/**
           if-no-files-found: warn
           retention-days: 14
