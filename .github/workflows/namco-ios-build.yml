@@ -1,0 +1,176 @@
+name: Namco Museum iOS - Build Attempt
+
+# Builds SDL2 for iOS arm64, then tries to configure and compile the pinned
+# xboxrecomp runtime against it. The goal of the first runs is NOT a working
+# app: it is a complete, categorized list of compile/link errors (the porting
+# worklist). Jobs never fail on compile errors so the logs always upload.
+
+'on':
+  workflow_dispatch:
+    inputs:
+      archive_drive_id:
+        description: "Google Drive file ID of the generated-C archive"
+        required: true
+        default: "1nKL3QkzTf4NBoa3giCOWYC4P3jgkolMX"
+        type: string
+      sdl2_tag:
+        description: "SDL2 release tag to build for iOS"
+        required: true
+        default: "release-2.30.9"
+        type: string
+      deployment_target:
+        description: "Minimum iOS version"
+        required: true
+        default: "16.0"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: namco-ios-build
+  cancel-in-progress: false
+
+env:
+  WORK: ${{ github.workspace }}/_work
+  PREFIX: ${{ github.workspace }}/_work/ios-prefix
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install cmake ninja gdown
+          mkdir -p "$WORK/logs" "$PREFIX"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Download generated-C archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCHIVE="$WORK/namco.zip"
+          gdown "${{ inputs.archive_drive_id }}" -O "$ARCHIVE"
+          test -s "$ARCHIVE"
+          unzip -t "$ARCHIVE" > /dev/null
+          mkdir -p "$WORK/namco"
+          unzip -q "$ARCHIVE" -d "$WORK/namco"
+          echo "generated C files: $(find "$WORK/namco" -name 'recomp_*.c' | wc -l)"
+
+      - name: Resolve pinned xboxrecomp commit
+        id: pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          F="$(find "$WORK/namco" -name xboxrecomp-commit.txt -print -quit)"
+          test -n "$F"
+          C="$(tr -d '[:space:]' < "$F")"
+          [[ "$C" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad commit '$C'"; exit 1; }
+          echo "commit=$C" >> "$GITHUB_OUTPUT"
+
+      - name: Check out xboxrecomp at pinned commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none https://github.com/sp00nznet/xboxrecomp.git "$WORK/xboxrecomp"
+          git -C "$WORK/xboxrecomp" fetch --depth 1 origin "${{ steps.pin.outputs.commit }}"
+          git -C "$WORK/xboxrecomp" checkout --detach FETCH_HEAD
+          test "$(git -C "$WORK/xboxrecomp" rev-parse HEAD)" = "${{ steps.pin.outputs.commit }}"
+          git -C "$WORK/xboxrecomp" submodule update --init --recursive
+
+      - name: Build SDL2 for iOS arm64
+        id: sdl2
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          {
+            git clone --depth 1 --branch "${{ inputs.sdl2_tag }}" https://github.com/libsdl-org/SDL.git "$WORK/SDL" &&
+            cmake -S "$WORK/SDL" -B "$WORK/sdl-build" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_SYSTEM_NAME=iOS \
+              -DCMAKE_OSX_SYSROOT=iphoneos \
+              -DCMAKE_OSX_ARCHITECTURES=arm64 \
+              -DCMAKE_OSX_DEPLOYMENT_TARGET="${{ inputs.deployment_target }}" \
+              -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+              -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TEST=OFF \
+              -DCMAKE_INSTALL_PREFIX="$PREFIX" &&
+            cmake --build "$WORK/sdl-build" --parallel 3 &&
+            cmake --install "$WORK/sdl-build"
+          } 2>&1 | tee "$WORK/logs/sdl2.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Configure runtime for iOS
+        id: configure
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          cmake -S "$WORK/xboxrecomp" -B "$WORK/rt-build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="${{ inputs.deployment_target }}" \
+            -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+            -DCMAKE_PREFIX_PATH="$PREFIX" \
+            -DCMAKE_FIND_ROOT_PATH="$PREFIX" \
+            2>&1 | tee "$WORK/logs/configure.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Build runtime (collect all errors)
+        id: compile
+        if: steps.configure.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          # -k 0: keep going so we see every failing file, not just the first
+          ninja -C "$WORK/rt-build" -k 0 2>&1 | tee "$WORK/logs/build.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Summarize results
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          L="$WORK/logs"
+          {
+            echo "# Namco iOS build attempt"
+            echo
+            echo "- SDL2 (iOS arm64): ${{ steps.sdl2.outcome }}"
+            echo "- Runtime configure: ${{ steps.configure.outcome }}"
+            echo "- Runtime build: ${{ steps.compile.outcome }}"
+            echo "- Pinned runtime: ${{ steps.pin.outputs.commit }}"
+            echo
+            if [[ -f "$L/configure.log" ]]; then
+              echo "## CMake errors"
+              grep -nE 'CMake Error|Could NOT find|not found' "$L/configure.log" | head -40 || true
+              echo
+            fi
+            if [[ -f "$L/build.log" ]]; then
+              echo "## Compile errors by file (count)"
+              grep -E 'error:' "$L/build.log" | sed -E 's/^([^:]+):[0-9]+:[0-9]+: error:.*/\1/' \
+                | sed "s#$WORK/xboxrecomp/##" | sort | uniq -c | sort -rn | head -40 || true
+              echo
+              echo "## Most common error messages"
+              grep -E 'error:' "$L/build.log" | sed -E 's/^[^:]+:[0-9]+:[0-9]+: error: //' \
+                | sort | uniq -c | sort -rn | head -30 || true
+            fi
+          } | tee "$L/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: namco-ios-build-logs
+          path: ${{ env.WORK }}/logs/
+          if-no-files-found: warn
+          retention-days: 30
