@@ -122,12 +122,36 @@ jobs:
             git clone --depth 1 --branch "${{ inputs.openssl_tag }}" https://github.com/openssl/openssl.git "$WORK/openssl" &&
             cd "$WORK/openssl" &&
             IPHONEOS_DEPLOYMENT_TARGET="${{ inputs.deployment_target }}" \
-              ./Configure ios64-xcrun no-shared no-apps no-tests no-docs no-module \
+              ./Configure ios64-xcrun no-shared no-tests no-module \
                 --prefix="$PREFIX" --openssldir="$PREFIX/ssl" &&
             make -j3 build_libs &&
             make install_dev
           } 2>&1 | tee "$WORK/logs/openssl.log"
           exit "${PIPESTATUS[0]}"
+
+      - name: Create stub epoxy (diagnostic only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # libepoxy cannot work on iOS (it dlopens desktop GL). This stub only
+          # lets CMake configure so the compiler shows exactly which desktop-GL
+          # calls in d3d8_gl.c have no OpenGL ES equivalent. It is NOT a fix.
+          mkdir -p "$PREFIX/include/epoxy" "$PREFIX/lib/pkgconfig"
+          cat > "$PREFIX/include/epoxy/gl.h" <<'EOF'
+          #pragma once
+          #include <OpenGLES/ES3/gl.h>
+          #include <OpenGLES/ES3/glext.h>
+          EOF
+          sed -i '' 's/^          //' "$PREFIX/include/epoxy/gl.h"
+          cat > "$PREFIX/lib/pkgconfig/epoxy.pc" <<EOF
+          prefix=$PREFIX
+          Name: epoxy
+          Description: iOS diagnostic stub (OpenGL ES)
+          Version: 1.5.10
+          Cflags: -I$PREFIX/include
+          Libs: -framework OpenGLES
+          EOF
+          sed -i '' 's/^          //' "$PREFIX/lib/pkgconfig/epoxy.pc"
 
       - name: Configure runtime for iOS
         id: configure
@@ -135,6 +159,7 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
+          export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
           cmake -S "$WORK/xboxrecomp" -B "$WORK/rt-build" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_SYSTEM_NAME=iOS \
@@ -202,4 +227,3 @@ jobs:
           path: ${{ env.WORK }}/logs/
           if-no-files-found: warn
           retention-days: 30
-
