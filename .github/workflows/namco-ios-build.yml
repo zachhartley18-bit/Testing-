@@ -26,6 +26,7 @@ jobs:
       MC3_XCODEBUILD_ARGS: 'CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='
       MC3_BUILD_ID: ${{ github.sha }}
 
+    steps:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
@@ -47,7 +48,7 @@ jobs:
             unzip -tq "$GITHUB_WORKSPACE/Testing-Namco-Merged-Source.zip"
             unzip -q "$GITHUB_WORKSPACE/Testing-Namco-Merged-Source.zip" -d "$SOURCE_DIR"
           else
-            echo "::error::Could not find the expanded project or Testing-Namco-Merged-Source.zip."
+            echo "::error::Could not find the expanded MC3/Namco project or Testing-Namco-Merged-Source.zip at the repository root."
             exit 1
           fi
 
@@ -165,8 +166,8 @@ jobs:
           {
             echo "## Namco Museum unsigned iOS package"
             echo
-            echo "- Bundle identifier: \\`$BUNDLE_ID\\`"
-            echo "- Executable architecture(s): \\`$ARCHS\\`"
+            echo "- Bundle identifier: \`$BUNDLE_ID\`"
+            echo "- Executable architecture(s): \`$ARCHS\`"
             echo "- IPA size: $(du -h "$GITHUB_WORKSPACE/NamcoMuseum.ipa" | awk '{print $1}')"
             echo "- Signing: disabled; ready for your own signing workflow"
           } >> "$GITHUB_STEP_SUMMARY"
