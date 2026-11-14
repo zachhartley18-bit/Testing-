@@ -19,9 +19,7 @@ cancel-in-progress: true
 
 jobs:
 runtime-audit:
-if: >-
-github.event_name == ‘workflow_dispatch’ ||
-github.event.workflow_run.conclusion == ‘success’
+if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
 
 runs-on: macos-15
 timeout-minutes: 60
