@@ -26,9 +26,10 @@ jobs:
       MC3_XCODEBUILD_ARGS: 'CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='
       MC3_BUILD_ID: ${{ github.sha }}
 
-    steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: namco-integration
 
       - name: Locate or extract the merged Namco project
         shell: bash
