@@ -24,49 +24,39 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Google Drive downloader
-        run: python -m pip install --upgrade gdown
-
-      # ==========================================
-      # DOWNLOAD EXISTING NAMCO RECOMPILED FILES
-      # ==========================================
-
-      - name: Download Namco generated-C archive
+       - name: Download Namco generated-C archive
         shell: bash
         run: |
           set -euo pipefail
 
-          ARCHIVE="$RUNNER_TEMP/namco-results.zip"
+          ARCHIVE="$GITHUB_WORKSPACE/namco-museum-xboxrecomp-results.zip"
           ROOT="$RUNNER_TEMP/namco-artifact"
 
           mkdir -p "$ROOT"
 
-          gdown "1nKL3QkzTf4NBoa3giCOWYC4P3jgkolMX"
+          gdown "1nKL3QkzTf4NBoa3giCOWYC4P3jgkolMX" -O "$ARCHIVE"
 
-          if [[ ! -s "$ARCHIVE" ]]; then
-            echo "::error::Google Drive download was empty."
+          if [[ ! -f "$ARCHIVE" || ! -s "$ARCHIVE" ]]; then
+            echo "::error::Archive was not saved at the expected location."
+            ls -lah "$GITHUB_WORKSPACE"
             exit 1
           fi
 
-          if file "$ARCHIVE" | grep -qiE 'HTML|text'; then
-            echo "::error::Google Drive returned a webpage instead of the ZIP."
-            echo "Check Google Drive sharing permissions."
-            exit 1
-          fi
+          echo "Downloaded archive:"
+          ls -lh "$ARCHIVE"
 
           if ! unzip -tq "$ARCHIVE"; then
-            echo "::error::Downloaded file is not a valid ZIP archive."
+            echo "::error::Downloaded archive is not a valid ZIP."
             exit 1
           fi
 
           unzip -q "$ARCHIVE" -d "$ROOT"
 
-          rm -f "$ARCHIVE"
+          echo "Archive extracted successfully."
 
-          echo "Namco archive downloaded successfully."
-
-          echo "Archive contents:"
           find "$ROOT" -type f | head -100
+
+          rm -f "$ARCHIVE"
 
       # ==========================================
       # VALIDATE GENERATED C SOURCE
