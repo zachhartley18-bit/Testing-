@@ -153,6 +153,41 @@ jobs:
           EOF
           sed -i '' 's/^          //' "$PREFIX/lib/pkgconfig/epoxy.pc"
 
+      - name: Apply iOS compatibility patches (CI checkout only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          RT="$WORK/xboxrecomp"
+
+          # 1) mach_vm.h is "unsupported" on iOS. vm_map() from <mach/vm_map.h>
+          #    has the same signature and is available, so swap the names.
+          #    (win32_compat.c uses it for a fixed, no-replace VirtualAlloc.)
+          perl -pi -e '
+            s{#include <mach/mach_vm.h>}{#include <mach/mach.h>\n#include <mach/vm_map.h>};
+            s/\bmach_vm_map\b/vm_map/g;
+            s/\bmach_vm_address_t\b/vm_address_t/g;
+            s/\bmach_vm_size_t\b/vm_size_t/g;
+          ' "$RT/src/platform/win32_compat.c"
+
+          # 2) Desktop-GL names that OpenGL ES spells differently. Injected with
+          #    -include so the runtime source stays untouched.
+          cat > "$WORK/ios_gl_compat.h" <<'EOF'
+          #pragma once
+          #define GLES_SILENCE_DEPRECATION 1
+          #define glClearDepth glClearDepthf
+          #define glDepthRange glDepthRangef
+          /* BGRA + UNSIGNED_INT_8_8_8_8_REV is byte order B,G,R,A on little-endian,
+             which ES expresses as BGRA + UNSIGNED_BYTE. */
+          #define GL_UNSIGNED_INT_8_8_8_8_REV 0x1401
+          EOF
+          sed -i '' 's/^          //' "$WORK/ios_gl_compat.h"
+
+          mkdir -p "$WORK/logs"
+          {
+            echo "remaining mach_vm references in win32_compat.c:"
+            grep -n 'mach_vm' "$RT/src/platform/win32_compat.c" || echo "(none)"
+          } | tee "$WORK/logs/patches.log"
+
       - name: Configure runtime for iOS
         id: configure
         continue-on-error: true
@@ -169,6 +204,7 @@ jobs:
             -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
             -DCMAKE_PREFIX_PATH="$PREFIX" \
             -DCMAKE_FIND_ROOT_PATH="$PREFIX" \
+            -DCMAKE_C_FLAGS="-include $WORK/ios_gl_compat.h" \
             -DOPENSSL_ROOT_DIR="$PREFIX" \
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DOPENSSL_INCLUDE_DIR="$PREFIX/include" \
@@ -227,3 +263,4 @@ jobs:
           path: ${{ env.WORK }}/logs/
           if-no-files-found: warn
           retention-days: 30
+
