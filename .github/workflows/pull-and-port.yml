@@ -1,0 +1,38 @@
+name: Pull Drive Game & Run Apple Porting
+
+on:
+  workflow_dispatch:
+
+jobs:
+  port-game:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Repository & Submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download Game from Google Drive
+        env:
+          FILE_ID: "1mHlZ2hqkAexh89G46LNB0dpdgH2MaO11"
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_DRIVE_API_KEY }} # Optional, if using public file API
+        run: |
+          echo "Targeting Google Drive File ID: $FILE_ID"
+          
+          # If the file is public or shared via a direct download script:
+          curl -sc /tmp/cookie "https://docs.google.com/uc?export=download&id=$FILE_ID" > /tmp/drive_download_page
+          CODE="$(awk '/_warning_/ {print $NF}' /tmp/drive_download_page)"
+          curl -Lb /tmp/cookie "https://docs.google.com/uc?export=download&confirm=$CODE&id=$FILE_ID" -o game_source.zip
+          
+          echo "Extracting game source files..."
+          unzip -q game_source.zip -d game_directory/
+
+      - name: Select Xcode Version
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Initialize Apple Game Porting Tools
+        run: |
+          git submodule update --init --recursive
+          # Run your porting and compilation script against game_directory/
+          cmake -B build-ios -G "Xcode" -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0
