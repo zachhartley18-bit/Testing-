@@ -1,6 +1,6 @@
 name: Namco Museum iOS - Runtime Preflight
 
-on:
+"on":
   workflow_dispatch:
 
 permissions:
@@ -24,7 +24,10 @@ jobs:
         with:
           python-version: "3.12"
 
-       - name: Download Namco generated-C archive
+      - name: Install Google Drive downloader
+        run: python -m pip install --upgrade gdown
+
+      - name: Download Namco generated-C archive
         shell: bash
         run: |
           set -euo pipefail
@@ -36,20 +39,12 @@ jobs:
 
           gdown "1nKL3QkzTf4NBoa3giCOWYC4P3jgkolMX" -O "$ARCHIVE"
 
-          if [[ ! -f "$ARCHIVE" || ! -s "$ARCHIVE" ]]; then
-            echo "::error::Archive was not saved at the expected location."
-            ls -lah "$GITHUB_WORKSPACE"
-            exit 1
-          fi
+          test -s "$ARCHIVE"
 
           echo "Downloaded archive:"
           ls -lh "$ARCHIVE"
 
-          if ! unzip -tq "$ARCHIVE"; then
-            echo "::error::Downloaded archive is not a valid ZIP."
-            exit 1
-          fi
-
+          unzip -tq "$ARCHIVE"
           unzip -q "$ARCHIVE" -d "$ROOT"
 
           echo "Archive extracted successfully."
@@ -57,10 +52,6 @@ jobs:
           find "$ROOT" -type f | head -100
 
           rm -f "$ARCHIVE"
-
-      # ==========================================
-      # VALIDATE GENERATED C SOURCE
-      # ==========================================
 
       - name: Validate generated sources
         id: inputs
@@ -72,32 +63,6 @@ jobs:
           REPORT="$RUNNER_TEMP/namco-preflight"
 
           mkdir -p "$REPORT"
-
-          echo "## Downloaded Namco archive inventory" \
-            | tee "$REPORT/preflight.md"
-
-          python3 - "$ROOT" "$REPORT/artifact-files.txt" <<'PY'
-          import sys
-          from pathlib import Path
-
-          root = Path(sys.argv[1])
-          output = Path(sys.argv[2])
-
-          rows = []
-
-          for path in sorted(p for p in root.rglob("*") if p.is_file()):
-              rows.append(
-                  f"{path.relative_to(root)}\t{path.stat().st_size} bytes"
-              )
-
-          output.write_text(
-              "\n".join(rows) + "\n",
-              encoding="utf-8"
-          )
-          PY
-
-          cat "$REPORT/artifact-files.txt" \
-            | tee -a "$REPORT/preflight.md"
 
           FUNCS="$(find "$ROOT" -name recomp_funcs.h -print -quit)"
           TYPES="$(find "$ROOT" -name recomp_types.h -print -quit)"
@@ -115,7 +80,7 @@ jobs:
           RUNTIME_COMMIT="$(tr -d '[:space:]' < "$COMMIT_FILE")"
 
           if [[ ! "$RUNTIME_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::Invalid XboxRecomp commit: $RUNTIME_COMMIT"
+            echo "::error::Invalid XboxRecomp commit."
             exit 1
           fi
 
@@ -124,31 +89,18 @@ jobs:
           )"
 
           if [[ "$GENERATED_C_COUNT" -eq 0 ]]; then
-            echo "::error::No generated C files were found."
+            echo "::error::No generated C files found."
             exit 1
           fi
 
           echo "runtime_commit=$RUNTIME_COMMIT" >> "$GITHUB_OUTPUT"
-
-          echo "generated_c_count=$GENERATED_C_COUNT" \
-            >> "$GITHUB_OUTPUT"
+          echo "generated_c_count=$GENERATED_C_COUNT" >> "$GITHUB_OUTPUT"
 
           {
-            echo
-            echo "### Required inputs"
-            echo "- Generated function declarations: present"
-            echo "- Generated type definitions: present"
-            echo "- Generated dispatch source: present"
-            echo "- Original XBE: present"
+            echo "## Namco archive validation"
             echo "- Generated C files: $GENERATED_C_COUNT"
-            echo "- XboxRecomp commit: \`$RUNTIME_COMMIT\`"
-          } | tee -a "$REPORT/preflight.md"
-
-          cat "$REPORT/preflight.md" >> "$GITHUB_STEP_SUMMARY"
-
-      # ==========================================
-      # RESTORE EXACT XBOXRECOMP VERSION
-      # ==========================================
+            echo "- XboxRecomp commit: $RUNTIME_COMMIT"
+          } | tee "$REPORT/preflight.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check out exact XboxRecomp revision
         shell: bash
@@ -170,16 +122,7 @@ jobs:
             git -C "$RUNNER_TEMP/xboxrecomp" rev-parse HEAD
           )"
 
-          if [[ "$ACTUAL_COMMIT" != "${{ steps.inputs.outputs.runtime_commit }}" ]]; then
-            echo "::error::XboxRecomp revision mismatch."
-            exit 1
-          fi
-
-          echo "Correct XboxRecomp revision restored."
-
-      # ==========================================
-      # AUDIT IOS / GRAPHICS COMPATIBILITY
-      # ==========================================
+          test "$ACTUAL_COMMIT" = "${{ steps.inputs.outputs.runtime_commit }}"
 
       - name: Audit runtime platform and renderer
         shell: bash
@@ -190,54 +133,33 @@ jobs:
           REPORT="$RUNNER_TEMP/namco-preflight"
 
           {
-            echo
             echo "## Runtime platform audit"
-
-            echo "- Runtime commit: \`$(git -C "$RUNTIME" rev-parse HEAD)\`"
+            echo "- Runtime commit: $(git -C "$RUNTIME" rev-parse HEAD)"
 
             echo
             echo "### iOS-related CMake configuration"
 
             grep -RInE 'IOS|iOS|CMAKE_SYSTEM_NAME' \
               "$RUNTIME/CMakeLists.txt" "$RUNTIME/src" \
-              --include='CMakeLists.txt' \
-              --include='*.cmake' || true
+              --include='CMakeLists.txt' --include='*.cmake' || true
 
             echo
             echo "### Renderer implementation files"
 
             find "$RUNTIME/src" -type f \
-              \( \
-                -iname '*metal*' \
-                -o -iname '*vulkan*' \
-                -o -iname '*gl*' \
-                -o -iname '*present*' \
-              \) -print | sort
+              \( -iname '*metal*' -o -iname '*vulkan*' -o -iname '*gl*' -o -iname '*present*' \) \
+              -print | sort
 
             echo
-            echo "### Generated Namco C source count"
+            echo "### Renderer references"
 
-            find "$RUNNER_TEMP/namco-artifact" \
-              -type f -name 'recomp_*.c' | wc -l
-
-            echo
-            echo "### Renderer references in CMake"
-
-            grep -RInE \
-              'OpenGL|OpenGLES|Metal|Vulkan|nv2a_gl|nv2a_vk' \
+            grep -RInE 'OpenGL|OpenGLES|Metal|Vulkan|nv2a_gl|nv2a_vk' \
               "$RUNTIME/CMakeLists.txt" "$RUNTIME/src" \
-              --include='CMakeLists.txt' \
-              --include='*.cmake' || true
+              --include='CMakeLists.txt' --include='*.cmake' || true
 
-          } | tee "$REPORT/runtime-audit.txt" \
-            >> "$REPORT/preflight.md"
+          } | tee "$REPORT/runtime-audit.txt" >> "$REPORT/preflight.md"
 
-          cat "$REPORT/runtime-audit.txt" \
-            >> "$GITHUB_STEP_SUMMARY"
-
-      # ==========================================
-      # REPORT GRAPHICS READINESS
-      # ==========================================
+          cat "$REPORT/preflight.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Report iOS renderer readiness
         shell: bash
@@ -246,30 +168,16 @@ jobs:
 
           RUNTIME="$RUNNER_TEMP/xboxrecomp"
 
-          if find "$RUNTIME/src" -type f \
-            -iname '*metal*' | grep -q .; then
-
-            echo "Metal-related source files exist."
-            echo "They still require compatibility and CMake integration review."
-
+          if find "$RUNTIME/src" -type f -iname '*metal*' | grep -q .; then
+            echo "Metal-related source files exist; integration still needs review."
           else
-
-            echo "::warning::This XboxRecomp revision has no Metal renderer source files."
-
-            echo "A UIKit/SDL shell or Metal drawable alone cannot execute"
-            echo "the Xbox NV2A/D3D8 graphics path."
-
+            echo "::warning::No Metal renderer source files found in this runtime revision."
           fi
 
-          echo "::notice::Existing Namco generated C files were downloaded and validated."
+          echo "::notice::Namco generated C files and runtime revision validated."
+          echo "::notice::This is a preflight workflow, not an IPA build."
 
-          echo "::notice::This workflow is currently a runtime preflight, not an IPA build."
-
-      # ==========================================
-      # SAVE AUDIT RESULTS
-      # ==========================================
-
-      - name: Upload preflight report and source manifest
+      - name: Upload preflight results
         if: always()
         uses: actions/upload-artifact@v4
         with:
