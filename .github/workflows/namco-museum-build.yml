@@ -1,0 +1,176 @@
+name: Namco Museum IPA (archive build)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: namco-archive-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-ipa:
+    name: Extract source archive and build unsigned iOS IPA
+    runs-on: xcode-27
+    timeout-minutes: 180
+
+    env:
+      ARCHIVE_NAME: Testing-Namco-Merged-Source.zip
+      GAME: namco
+      JOBS: "2"
+      MC3_XCODE_CONFIGURATION: Release
+
+    steps:
+      - name: Initialize source directory
+        shell: bash
+        run: |
+          echo "SOURCE_DIR=$GITHUB_WORKSPACE/_namco_source" >> "$GITHUB_ENV"
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify uploaded source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "$GITHUB_WORKSPACE/$ARCHIVE_NAME" ]; then
+            echo "ERROR: $ARCHIVE_NAME not found in repository root."
+            exit 1
+          fi
+
+          unzip -tq "$GITHUB_WORKSPACE/$ARCHIVE_NAME"
+
+      - name: Extract project source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf "$SOURCE_DIR"
+          mkdir -p "$SOURCE_DIR"
+
+          unzip -q "$GITHUB_WORKSPACE/$ARCHIVE_NAME" -d "$SOURCE_DIR"
+
+          test -f "$SOURCE_DIR/Makefile"
+          test -f "$SOURCE_DIR/tools/ios_build.sh"
+          test -f "$SOURCE_DIR/config/namco/game.env"
+          test -f "$SOURCE_DIR/namco/generated/recomp_types.h"
+
+          echo "Source extraction successful."
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          brew install cmake ninja xcodegen
+
+          xcodebuild -version
+          cmake --version
+          ninja --version
+          xcodegen --version
+
+      - name: Download SDL2
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDL_DIR="$SOURCE_DIR/work-dub/tools/SDL2-2.32.10"
+
+          mkdir -p "$(dirname "$SDL_DIR")"
+
+          git clone --depth 1 \
+            --branch release-2.32.10 \
+            https://github.com/libsdl-org/SDL.git \
+            "$SDL_DIR"
+
+          echo "MC3_SDL_DIR=$SDL_DIR" >> "$GITHUB_ENV"
+
+      - name: Validate Namco generated sources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$SOURCE_DIR"
+
+          COUNT=$(find namco/generated -maxdepth 1 \
+            -name 'recomp_[0-9][0-9][0-9][0-9].c' | wc -l | tr -d ' ')
+
+          if [ "$COUNT" -ne 23 ]; then
+            echo "Expected 23 generated C files, found $COUNT"
+            exit 1
+          fi
+
+          mkdir -p work-namco/gen
+
+          cp namco/generated/*.c \
+             namco/generated/recomp_types.h \
+             namco/generated/recomp_funcs.h \
+             work-namco/gen/
+
+          grep -q 'g_eflags' work-namco/gen/recomp_types.h
+          grep -q 'recomp_pushfd' work-namco/gen/recomp_types.h
+          grep -q 'RECOMP_FP_PC' work-namco/gen/recomp_types.h
+          grep -q 'RECOMP_ICALL_SAFE_AT_CC' work-namco/gen/recomp_types.h
+
+          while IFS= read -r -d '' source_file; do
+            clang -std=gnu11 -fsyntax-only -Wno-everything \
+              -I"$SOURCE_DIR/config/namco" \
+              -I"$SOURCE_DIR/work-namco/gen" \
+              -I"$SOURCE_DIR/xboxrecomp/include" \
+              "$source_file"
+          done < <(find work-namco/gen -maxdepth 1 -name 'recomp_*.c' -print0)
+
+          echo "Namco source validation passed."
+
+      - name: Build iOS application
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$SOURCE_DIR"
+
+          make ios GAME=namco JOBS=2
+
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$SOURCE_DIR"
+
+          APP="work-namco/ios/iphoneos/Namco Museum.app"
+
+          if [ ! -d "$APP" ]; then
+            echo "Application bundle not found: $APP"
+            find work-namco/ios/iphoneos -maxdepth 3 -print || true
+            exit 1
+          fi
+
+          rm -rf "$GITHUB_WORKSPACE/Payload"
+          rm -f "$GITHUB_WORKSPACE/NamcoMuseum.ipa"
+
+          mkdir -p "$GITHUB_WORKSPACE/Payload"
+
+          ditto "$APP" "$GITHUB_WORKSPACE/Payload/Namco Museum.app"
+
+          cd "$GITHUB_WORKSPACE"
+
+          zip -qry NamcoMuseum.ipa Payload
+
+          shasum -a 256 NamcoMuseum.ipa > NamcoMuseum.ipa.sha256
+
+      - name: Upload IPA and build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: NamcoMuseum-${{ github.run_number }}
+          path: |
+            NamcoMuseum.ipa
+            NamcoMuseum.ipa.sha256
+            _namco_source/work-namco/logs/**
+            _namco_source/work-namco/ios/iphoneos/xcode/Logs/Build/**
+          if-no-files-found: warn
+          retention-days: 14
