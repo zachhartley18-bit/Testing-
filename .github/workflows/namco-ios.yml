@@ -41,9 +41,7 @@ jobs:
 
           mkdir -p "$ROOT"
 
-          gdown --fuzzy \
-            "https://drive.google.com/file/d/1nKL3QkzTf4NBoa3giCOWYC4P3jgkolMX/view?usp=drivesdk" \
-            -O "$ARCHIVE"
+          gdown "1nKL3QkzTf4NBoa3giCOWYC4P3jgkolMX"
 
           if [[ ! -s "$ARCHIVE" ]]; then
             echo "::error::Google Drive download was empty."
