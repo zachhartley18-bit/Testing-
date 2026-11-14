@@ -15,12 +15,11 @@ jobs:
 
       - name: Download Game from Google Drive
         env:
-          FILE_ID: "1mHlZ2hqkAexh89G46LNB0dpdgH2MaO11"
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_DRIVE_API_KEY }} # Optional, if using public file API
+          FILE_ID: "1nKL3QkzTf4NBoa3giCOWYC4P3jgkolMX"
         run: |
           echo "Targeting Google Drive File ID: $FILE_ID"
           
-          # If the file is public or shared via a direct download script:
+          # Handle large file warning pages for public Google Drive links
           curl -sc /tmp/cookie "https://docs.google.com/uc?export=download&id=$FILE_ID" > /tmp/drive_download_page
           CODE="$(awk '/_warning_/ {print $NF}' /tmp/drive_download_page)"
           curl -Lb /tmp/cookie "https://docs.google.com/uc?export=download&confirm=$CODE&id=$FILE_ID" -o game_source.zip
@@ -34,5 +33,7 @@ jobs:
       - name: Initialize Apple Game Porting Tools
         run: |
           git submodule update --init --recursive
-          # Run your porting and compilation script against game_directory/
-          cmake -B build-ios -G "Xcode" -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0
+          cmake -B build-ios -G "Xcode" \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0
+
