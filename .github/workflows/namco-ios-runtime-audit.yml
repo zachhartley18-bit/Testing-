@@ -1,0 +1,127 @@
+name: Namco iOS Runtime Audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: namco-ios-runtime-audit
+  cancel-in-progress: false
+
+jobs:
+  runtime-audit:
+    name: Audit pinned XboxRecomp for iOS ARM64
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    env:
+      XBOXRECOMP_REPO: https://github.com/sp00nznet/xboxrecomp.git
+      XBOXRECOMP_COMMIT: 343b6d8901723b37ce568b2418c5df4e1fe1d223
+
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v4
+
+      - name: Install audit utilities
+        run: |
+          brew install ripgrep
+
+      - name: Check out exact XboxRecomp revision
+        run: |
+          git clone "$XBOXRECOMP_REPO" xboxrecomp
+          cd xboxrecomp
+          git checkout "$XBOXRECOMP_COMMIT"
+
+          ACTUAL_COMMIT="$(git rev-parse HEAD)"
+
+          if [ "$ACTUAL_COMMIT" != "$XBOXRECOMP_COMMIT" ]; then
+            echo "::error::XboxRecomp revision mismatch."
+            exit 1
+          fi
+
+          echo "Verified XboxRecomp revision: $ACTUAL_COMMIT"
+
+      - name: Audit runtime source and platform dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RUNTIME="$GITHUB_WORKSPACE/xboxrecomp"
+          REPORT="$GITHUB_WORKSPACE/namco-ios-runtime-audit.txt"
+
+          {
+            echo "NAMCO IOS RUNTIME AUDIT"
+            echo "======================="
+            echo
+            echo "Expected commit: $XBOXRECOMP_COMMIT"
+            echo "Actual commit: $(git -C "$RUNTIME" rev-parse HEAD)"
+            echo
+            echo "1. REPOSITORY STRUCTURE"
+            echo "-----------------------"
+            find "$RUNTIME" -maxdepth 3 \
+              \( -name CMakeLists.txt -o -name '*.cmake' \) \
+              -print | sort
+
+            echo
+            echo "2. PLATFORM-SPECIFIC SOURCE REFERENCES"
+            echo "--------------------------------------"
+            rg -n -i \
+              'windows\.h|d3d11|dxgi|win32|directsound|opengl|vulkan|metal|sdl|pthread|mmap|VirtualAlloc|VirtualProtect|CreateFileMapping|MapViewOfFileEx' \
+              "$RUNTIME" \
+              -g '*.{c,cc,cpp,h,hpp,cmake,txt}' \
+              || true
+
+            echo
+            echo "3. BUILD CONFIGURATION"
+            echo "----------------------"
+            rg -n \
+              'project\\(|add_subdirectory|target_link_libraries|find_package|option\\(|WIN32|APPLE|ANDROID|IOS|CMAKE_SYSTEM_NAME|CMAKE_OSX' \
+              "$RUNTIME" \
+              -g 'CMakeLists.txt' \
+              -g '*.cmake' \
+              || true
+
+            echo
+            echo "4. IOS AND APPLE PLATFORM REFERENCES"
+            echo "------------------------------------"
+            rg -n -i \
+              'ios|iphone|ipad|apple|darwin|mach_vm|mach/mach|TargetConditionals|UIKit|Metal|QuartzCore' \
+              "$RUNTIME" \
+              -g '*.{c,cc,cpp,h,hpp,cmake,txt}' \
+              || true
+
+            echo
+            echo "5. RUNTIME SOURCE FILE INVENTORY"
+            echo "--------------------------------"
+            find "$RUNTIME" -type f \
+              \( -name '*.c' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \) \
+              | sort
+
+          } > "$REPORT"
+
+          cat "$REPORT"
+
+      - name: Check available Apple toolchain
+        run: |
+          echo "Xcode version:"
+          xcodebuild -version
+
+          echo
+          echo "Available iOS SDK:"
+          xcrun --sdk iphoneos --show-sdk-version
+
+          echo
+          echo "Available ARM64 iOS compiler target:"
+          xcrun --sdk iphoneos clang \
+            -target arm64-apple-ios17.0 \
+            -v -E -x c /dev/null
+
+      - name: Upload runtime audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: namco-ios-runtime-audit
+          path: namco-ios-runtime-audit.txt
+          if-no-files-found: error
+          retention-days: 30
