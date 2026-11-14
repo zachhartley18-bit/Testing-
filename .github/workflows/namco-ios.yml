@@ -1,285 +1,176 @@
-name: Namco Museum iOS - Runtime Preflight
+name: Namco Museum IPA
 
-'on':
+on:
   workflow_dispatch:
-    inputs:
-      recompile_run_id:
-        description: "Successful namco-recompile.yml run ID (leave blank to use the latest successful run)"
-        required: false
-        type: string
-  workflow_run:
-    workflows:
-      - "Namco Museum - Xbox Recompilation"
-    types:
-      - completed
 
 permissions:
-  actions: read
   contents: read
 
 concurrency:
-  group: namco-ios-${{ github.event.workflow_run.id || inputs.recompile_run_id || github.ref }}
+  group: namco-archive-ios-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  preflight:
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
-    runs-on: macos-15
-    timeout-minutes: 30
+  build-ipa:
+    name: Build Namco Museum IPA
+    runs-on: xcode-27
+    timeout-minutes: 180
+
+    env:
+      ARCHIVE_NAME: Testing-Namco-Merged-Source.zip
+      GAME: namco
+      JOBS: "2"
+      MC3_XCODE_CONFIGURATION: Release
 
     steps:
-      - name: Check out project
+      - name: Set source directory
+        shell: bash
+        run: echo "SOURCE_DIR=$RUNNER_TEMP/namco-source" >> "$GITHUB_ENV"
+
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-runs-on: macos-15
-timeout-minutes: 60
-steps:
-  - name: Check out project
-    uses: actions/checkout@v4
-  - name: Install audit dependencies
-    shell: bash
-    run: |
-      set -euo pipefail
-      brew install cmake ninja
-  - name: Download existing Namco generated-C archive
-    shell: bash
-    run: |
-      set -euo pipefail
-      brew install gdown
-      ARCHIVE="$GITHUB_WORKSPACE/namco-museum-xboxrecomp-results.zip"
-      gdown "1nKL3QkzTf4NBoa3giCOWYC4P3jgkolMX" -O "$ARCHIVE"
-      if [[ ! -s "$ARCHIVE" ]]; then
-        echo "::error::Namco archive download failed or was empty."
-        exit 1
-      fi
-      unzip -t "$ARCHIVE"
-      mkdir -p "$RUNNER_TEMP/namco-artifact"
-      unzip -q "$ARCHIVE" -d "$RUNNER_TEMP/namco-artifact"
-      echo "Namco archive downloaded and extracted."
-  - name: Validate Namco generated sources
-    id: inputs
-    shell: bash
-    run: |
-      set -euo pipefail
-      ROOT="$RUNNER_TEMP/namco-artifact"
-      REPORT="$RUNNER_TEMP/namco-preflight"
-      mkdir -p "$REPORT"
-      FUNCS="$(find "$ROOT" -name recomp_funcs.h -print -quit)"
-      TYPES="$(find "$ROOT" -name recomp_types.h -print -quit)"
-      DISPATCH="$(find "$ROOT" -name recomp_dispatch.c -print -quit)"
-      XBE="$(find "$ROOT" -iname default.xbe -print -quit)"
-      COMMIT_FILE="$(find "$ROOT" -name xboxrecomp-commit.txt -print -quit)"
-      for item in FUNCS TYPES DISPATCH XBE COMMIT_FILE; do
-        if [[ -z "${!item}" || ! -s "${!item}" ]]; then
-          echo "::error::Required artifact component is missing: $item"
-          exit 1
-        fi
-      done
-      RUNTIME_COMMIT="$(tr -d '[:space:]' < "$COMMIT_FILE")"
-      if [[ ! "$RUNTIME_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
-        echo "::error::Invalid XboxRecomp commit: $RUNTIME_COMMIT"
-        exit 1
-      fi
-      GENERATED_COUNT="$(find "$ROOT" -type f -name 'recomp_*.c' | wc -l | tr -d ' ')"
-      if [[ "$GENERATED_COUNT" -eq 0 ]]; then
-        echo "::error::No generated C files were found."
-        exit 1
-      fi
-      echo "runtime_commit=$RUNTIME_COMMIT" >> "$GITHUB_OUTPUT"
-      {
-        echo "# Namco Museum Runtime Audit"
-        echo
-        echo "## Generated source validation"
-        echo "- Runtime revision: $RUNTIME_COMMIT"
-        echo "- Generated C files: $GENERATED_COUNT"
-        echo "- Function declarations: present"
-        echo "- Type definitions: present"
-        echo "- Dispatch source: present"
-        echo "- Original XBE: present"
-        echo
-        echo "## Artifact inventory"
-        find "$ROOT" -type f -exec sh -c '
-          for f do
-            printf "%s\t%s bytes\n" "${f#"$1"/}" "$(stat -f%z "$f")"
-          done
-        ' sh "$ROOT" {} +
-      } | tee "$REPORT/preflight.md"
-      cat "$REPORT/preflight.md" >> "$GITHUB_STEP_SUMMARY"
-  - name: Check out exact XboxRecomp runtime revision
-    shell: bash
-    run: |
-      set -euo pipefail
-      RUNTIME="$RUNNER_TEMP/xboxrecomp"
-      COMMIT="${{ steps.inputs.outputs.runtime_commit }}"
-      git clone \
-        --filter=blob:none \
-        https://github.com/sp00nznet/xboxrecomp.git \
-        "$RUNTIME"
-      git -C "$RUNTIME" fetch --depth 1 origin "$COMMIT"
-      git -C "$RUNTIME" checkout --detach FETCH_HEAD
-      ACTUAL="$(git -C "$RUNTIME" rev-parse HEAD)"
-      if [[ "$ACTUAL" != "$COMMIT" ]]; then
-        echo "::error::Runtime revision mismatch."
-        exit 1
-      fi
-      git -C "$RUNTIME" submodule update --init --recursive
-      echo "Checked out exact runtime revision: $ACTUAL"
-  - name: Inventory runtime source and platform dependencies
-    shell: bash
-    run: |
-      set -euo pipefail
-      RUNTIME="$RUNNER_TEMP/xboxrecomp"
-      REPORT="$RUNNER_TEMP/namco-preflight"
-      {
-        echo
-        echo "## Runtime source inventory"
-        find "$RUNTIME/src" -type f | sort
-        echo
-        echo "## CMake targets and platform branches"
-        grep -RInE \
-          'add_library|add_executable|add_subdirectory|CMAKE_SYSTEM_NAME|WIN32|APPLE|UNIX' \
-          "$RUNTIME/CMakeLists.txt" "$RUNTIME/src" \
-          --include='CMakeLists.txt' --include='*.cmake' || true
-        echo
-        echo "## Graphics and window dependencies"
-        grep -RInE \
-          'D3D11|DXGI|OpenGL|SDL|GLFW|CreateWindow|SwapChain|Present\(' \
-          "$RUNTIME/src" \
-          --include='*.c' --include='*.h' \
-          --include='*.cpp' --include='*.mm' || true
-        echo
-        echo "## Audio dependencies"
-        grep -RInE \
-          'waveOut|DirectSound|SDL.*Audio|AudioQueue|AVAudio|CoreAudio' \
-          "$RUNTIME/src" \
-          --include='*.c' --include='*.h' \
-          --include='*.cpp' --include='*.mm' || true
-        echo
-        echo "## Input dependencies"
-        grep -RInE \
-          'XInput|USB|GameController|GCController|SDL.*GameController' \
-          "$RUNTIME/src" \
-          --include='*.c' --include='*.h' \
-          --include='*.cpp' --include='*.mm' || true
-        echo
-        echo "## Memory and operating-system dependencies"
-        grep -RInE \
-          'VirtualAlloc|VirtualProtect|CreateFileMapping|MapViewOfFile|mmap|mach_vm|pthread|CreateThread|Nt[A-Z]' \
-          "$RUNTIME/src" \
-          --include='*.c' --include='*.h' \
-          --include='*.cpp' --include='*.mm' || true
-        echo
-        echo "## Metal and Objective-C source inventory"
-        find "$RUNTIME" -type f \
-          \( -iname '*.metal' -o -iname '*.mm' -o -iname '*metal*' \) \
-          | sort
-      } | tee "$REPORT/runtime-source-audit.txt"
-  - name: Inventory Namco analysis and unresolved calls
-    shell: bash
-    run: |
-      set -euo pipefail
-      ROOT="$RUNNER_TEMP/namco-artifact"
-      REPORT="$RUNNER_TEMP/namco-preflight"
-      ANALYSIS="$REPORT/namco-analysis"
-      mkdir -p "$ANALYSIS"
-      find "$ROOT" -type f \
-        \( -name 'summary.json' \
-        -o -name 'abi_functions.json' \
-        -o -name 'functions.json' \
-        -o -name 'labels.json' \
-        -o -name 'identified_functions.json' \
-        -o -name 'xrefs.json' \
-        -o -name 'recomp_stubs_unresolved.c' \) \
-        -print0 | while IFS= read -r -d '' FILE; do
-          RELATIVE="${FILE#"$ROOT"/}"
-          DEST="$ANALYSIS/$RELATIVE"
-          mkdir -p "$(dirname "$DEST")"
-          cp "$FILE" "$DEST"
-        done
-      STUBS="$(find "$ROOT" -name recomp_stubs_unresolved.c -print -quit)"
-      {
-        echo
-        echo "## Namco generated C files"
-        find "$ROOT" -type f -name 'recomp_*.c' | sort
-        echo
-        echo "## Unresolved stub source"
-        if [[ -n "$STUBS" ]]; then
-          grep -nE \
-            '^[[:space:]]*(void|uint32_t|int|float|double)[[:space:]]+sub_' \
-            "$STUBS" || true
-          echo
-          echo "Total stub source lines:"
-          wc -l < "$STUBS"
-        else
-          echo "Unresolved stub source was not found."
-        fi
-      } | tee -a "$REPORT/runtime-source-audit.txt"
-  - name: Configure Apple Silicon runtime baseline
-    id: configure
-    continue-on-error: true
-    shell: bash
-    run: |
-      set -euo pipefail
-      RUNTIME="$RUNNER_TEMP/xboxrecomp"
-      BUILD="$RUNNER_TEMP/xboxrecomp-build"
-      cmake -S "$RUNTIME" \
-        -B "$BUILD" \
-        -G Ninja \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_OSX_ARCHITECTURES=arm64
-      echo "configure=success" >> "$GITHUB_OUTPUT"
-  - name: Build Apple Silicon runtime baseline
-    id: build
-    if: steps.configure.outcome == 'success'
-    continue-on-error: true
-    shell: bash
-    run: |
-      set -euo pipefail
-      cmake --build "$RUNNER_TEMP/xboxrecomp-build" \
-        --config Release \
-        --parallel 3
-      echo "build=success" >> "$GITHUB_OUTPUT"
-  - name: Record build results
-    if: always()
-    shell: bash
-    run: |
-      set -euo pipefail
-      REPORT="$RUNNER_TEMP/namco-preflight"
-      mkdir -p "$REPORT"
-      {
-        echo
-        echo "## Apple Silicon build results"
-        echo "- Configure: ${{ steps.configure.outcome }}"
-        echo "- Build: ${{ steps.build.outcome }}"
-        echo
-        echo "This is a macOS ARM64 baseline, not an iOS build."
-        echo "It does not establish iOS compatibility."
-      } | tee -a "$REPORT/runtime-source-audit.txt"
-      cat "$REPORT/runtime-source-audit.txt" >> "$GITHUB_STEP_SUMMARY"
-  - name: Preserve exact runtime source
-    if: always()
-    shell: bash
-    run: |
-      set -euo pipefail
-      RUNTIME="$RUNNER_TEMP/xboxrecomp"
-      REPORT="$RUNNER_TEMP/namco-preflight"
-      mkdir -p "$REPORT"
-      if [[ -d "$RUNTIME" ]]; then
-        git -C "$RUNTIME" archive \
-          --format=tar \
-          HEAD \
-          | gzip > "$REPORT/xboxrecomp-pinned-source.tar.gz"
-        git -C "$RUNTIME" rev-parse HEAD \
-          > "$REPORT/xboxrecomp-commit.txt"
-        git -C "$RUNTIME" status --short \
-          > "$REPORT/xboxrecomp-working-tree.txt"
-      fi
-  - name: Upload Namco runtime audit
-    if: always()
-    uses: actions/upload-artifact@v4
-    with:
-      name: namco-runtime-audit
-      path: |
-        ${{ runner.temp }}/namco-preflight/
-      if-no-files-found: warn
-      retention-days: 14
+      - name: Verify source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f "$GITHUB_WORKSPACE/$ARCHIVE_NAME" || {
+            echo "ERROR: Source ZIP not found in repository root."
+            exit 1
+          }
+
+          unzip -tq "$GITHUB_WORKSPACE/$ARCHIVE_NAME"
+
+      - name: Extract source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf "$SOURCE_DIR"
+          mkdir -p "$SOURCE_DIR"
+
+          unzip -q "$GITHUB_WORKSPACE/$ARCHIVE_NAME" -d "$SOURCE_DIR"
+
+          test -f "$SOURCE_DIR/Makefile"
+          test -f "$SOURCE_DIR/tools/ios_build.sh"
+          test -f "$SOURCE_DIR/config/namco/game.env"
+          test -f "$SOURCE_DIR/namco/generated/recomp_types.h"
+
+          echo "Source extraction successful."
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          brew install cmake ninja xcodegen
+
+          xcodebuild -version
+          cmake --version
+          ninja --version
+          xcodegen --version
+
+      - name: Download SDL2
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDL_DIR="$SOURCE_DIR/work-dub/tools/SDL2-2.32.10"
+
+          mkdir -p "$(dirname "$SDL_DIR")"
+
+          git clone \
+            --depth 1 \
+            --branch release-2.32.10 \
+            https://github.com/libsdl-org/SDL.git \
+            "$SDL_DIR"
+
+          echo "MC3_SDL_DIR=$SDL_DIR" >> "$GITHUB_ENV"
+
+      - name: Validate Namco source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$SOURCE_DIR"
+
+          COUNT=$(find namco/generated -maxdepth 1 \
+            -name 'recomp_[0-9][0-9][0-9][0-9].c' | wc -l | tr -d ' ')
+
+          if [ "$COUNT" -ne 23 ]; then
+            echo "Expected 23 generated source files; found $COUNT"
+            exit 1
+          fi
+
+          mkdir -p work-namco/gen
+
+          cp namco/generated/*.c \
+             namco/generated/recomp_types.h \
+             namco/generated/recomp_funcs.h \
+             work-namco/gen/
+
+          grep -q 'g_eflags' work-namco/gen/recomp_types.h
+          grep -q 'recomp_pushfd' work-namco/gen/recomp_types.h
+          grep -q 'RECOMP_FP_PC' work-namco/gen/recomp_types.h
+          grep -q 'RECOMP_ICALL_SAFE_AT_CC' work-namco/gen/recomp_types.h
+
+          while IFS= read -r -d '' source_file; do
+            clang -std=gnu11 -fsyntax-only -Wno-everything \
+              -I"$SOURCE_DIR/config/namco" \
+              -I"$SOURCE_DIR/work-namco/gen" \
+              -I"$SOURCE_DIR/xboxrecomp/include" \
+              "$source_file"
+          done < <(find work-namco/gen -maxdepth 1 -name 'recomp_*.c' -print0)
+
+          echo "Namco source validation passed."
+
+      - name: Build iOS application
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$SOURCE_DIR"
+
+          make ios GAME=namco JOBS=2
+
+      - name: Package IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$SOURCE_DIR"
+
+          APP="work-namco/ios/iphoneos/Namco Museum.app"
+
+          if [ ! -d "$APP" ]; then
+            echo "Application bundle not found: $APP"
+            find work-namco/ios/iphoneos -maxdepth 3 -print || true
+            exit 1
+          fi
+
+          rm -rf "$GITHUB_WORKSPACE/Payload"
+          rm -f "$GITHUB_WORKSPACE/NamcoMuseum.ipa"
+
+          mkdir -p "$GITHUB_WORKSPACE/Payload"
+
+          ditto "$APP" "$GITHUB_WORKSPACE/Payload/Namco Museum.app"
+
+          cd "$GITHUB_WORKSPACE"
+
+          zip -qry NamcoMuseum.ipa Payload
+
+          shasum -a 256 NamcoMuseum.ipa > NamcoMuseum.ipa.sha256
+
+      - name: Upload build artifacts and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: NamcoMuseum-${{ github.run_number }}
+          path: |
+            NamcoMuseum.ipa
+            NamcoMuseum.ipa.sha256
+            ${{ runner.temp }}/namco-source/work-namco/logs/**
+            ${{ runner.temp }}/namco-source/work-namco/ios/iphoneos/xcode/Logs/Build/**
+          if-no-files-found: warn
+          retention-days: 14
