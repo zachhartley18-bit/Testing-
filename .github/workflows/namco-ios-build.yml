@@ -18,6 +18,11 @@ name: Namco Museum iOS - Build Attempt
         required: true
         default: "release-2.30.9"
         type: string
+      openssl_tag:
+        description: "OpenSSL release tag to build for iOS"
+        required: true
+        default: "openssl-3.0.16"
+        type: string
       deployment_target:
         description: "Minimum iOS version"
         required: true
@@ -107,6 +112,23 @@ jobs:
           } 2>&1 | tee "$WORK/logs/sdl2.log"
           exit "${PIPESTATUS[0]}"
 
+      - name: Build OpenSSL for iOS arm64
+        id: openssl
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          {
+            git clone --depth 1 --branch "${{ inputs.openssl_tag }}" https://github.com/openssl/openssl.git "$WORK/openssl" &&
+            cd "$WORK/openssl" &&
+            IPHONEOS_DEPLOYMENT_TARGET="${{ inputs.deployment_target }}" \
+              ./Configure ios64-xcrun no-shared no-apps no-tests no-docs no-module \
+                --prefix="$PREFIX" --openssldir="$PREFIX/ssl" &&
+            make -j3 build_libs &&
+            make install_dev
+          } 2>&1 | tee "$WORK/logs/openssl.log"
+          exit "${PIPESTATUS[0]}"
+
       - name: Configure runtime for iOS
         id: configure
         continue-on-error: true
@@ -122,6 +144,11 @@ jobs:
             -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
             -DCMAKE_PREFIX_PATH="$PREFIX" \
             -DCMAKE_FIND_ROOT_PATH="$PREFIX" \
+            -DOPENSSL_ROOT_DIR="$PREFIX" \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DOPENSSL_INCLUDE_DIR="$PREFIX/include" \
+            -DOPENSSL_CRYPTO_LIBRARY="$PREFIX/lib/libcrypto.a" \
+            -DOPENSSL_SSL_LIBRARY="$PREFIX/lib/libssl.a" \
             2>&1 | tee "$WORK/logs/configure.log"
           exit "${PIPESTATUS[0]}"
 
@@ -146,6 +173,7 @@ jobs:
             echo "# Namco iOS build attempt"
             echo
             echo "- SDL2 (iOS arm64): ${{ steps.sdl2.outcome }}"
+            echo "- OpenSSL (iOS arm64): ${{ steps.openssl.outcome }}"
             echo "- Runtime configure: ${{ steps.configure.outcome }}"
             echo "- Runtime build: ${{ steps.compile.outcome }}"
             echo "- Pinned runtime: ${{ steps.pin.outputs.commit }}"
@@ -174,3 +202,4 @@ jobs:
           path: ${{ env.WORK }}/logs/
           if-no-files-found: warn
           retention-days: 30
+
