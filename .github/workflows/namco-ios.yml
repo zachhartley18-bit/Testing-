@@ -1,25 +1,31 @@
-name: Namco Museum iOS - Runtime Audit
+name: Namco Museum iOS - Runtime Preflight
 
-“on”:
-workflow_dispatch:
-
-workflow_run:
-workflows:
-- “Namco Museum - Xbox Recompilation”
-types:
-- completed
+'on':
+  workflow_dispatch:
+    inputs:
+      recompile_run_id:
+        description: "Successful namco-recompile.yml run ID (leave blank to use the latest successful run)"
+        required: false
+        type: string
+  workflow_run:
+    workflows:
+      - "Namco Museum - Xbox Recompilation"
+    types:
+      - completed
 
 permissions:
-actions: read
-contents: read
+  actions: read
+  contents: read
 
 concurrency:
-group: namco-ios-${{ github.event.workflow_run.id || github.ref }}
-cancel-in-progress: true
+  group: namco-ios-${{ github.event.workflow_run.id || inputs.recompile_run_id || github.ref }}
+  cancel-in-progress: true
 
 jobs:
-runtime-audit:
-if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+  preflight:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: macos-15
+    timeout-minutes: 30
 
 runs-on: macos-15
 timeout-minutes: 60
