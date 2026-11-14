@@ -1,266 +1,185 @@
-name: Namco Museum iOS - Build Attempt
+name: Namco Museum iOS IPA
 
-# Builds SDL2 for iOS arm64, then tries to configure and compile the pinned
-# xboxrecomp runtime against it. The goal of the first runs is NOT a working
-# app: it is a complete, categorized list of compile/link errors (the porting
-# worklist). Jobs never fail on compile errors so the logs always upload.
-
-'on':
+on:
   workflow_dispatch:
-    inputs:
-      archive_drive_id:
-        description: "Google Drive file ID of the generated-C archive"
-        required: true
-        default: "1nKL3QkzTf4NBoa3giCOWYC4P3jgkolMX"
-        type: string
-      sdl2_tag:
-        description: "SDL2 release tag to build for iOS"
-        required: true
-        default: "release-2.30.9"
-        type: string
-      openssl_tag:
-        description: "OpenSSL release tag to build for iOS"
-        required: true
-        default: "openssl-3.0.16"
-        type: string
-      deployment_target:
-        description: "Minimum iOS version"
-        required: true
-        default: "16.0"
-        type: string
+  push:
+    paths:
+      - '.github/workflows/namco-ios-build.yml'
+      - 'Testing-Namco-Merged-Source.zip'
 
 permissions:
   contents: read
 
 concurrency:
-  group: namco-ios-build
-  cancel-in-progress: false
-
-env:
-  WORK: ${{ github.workspace }}/_work
-  PREFIX: ${{ github.workspace }}/_work/ios-prefix
+  group: namco-ios-ipa-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
-    runs-on: macos-15
-    timeout-minutes: 90
+  build-ipa:
+    name: Build and package unsigned Namco Museum IPA
+    runs-on: xcode-27
+    timeout-minutes: 180
+    env:
+      GAME: namco
+      JOBS: '2'
+      MC3_XCODE_CONFIGURATION: Release
+      MC3_XCODEBUILD_ARGS: 'CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='
+      MC3_BUILD_ID: ${{ github.sha }}
+
     steps:
-      - name: Check out project
+      - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install tools
+      - name: Locate or extract the merged Namco project
         shell: bash
         run: |
           set -euo pipefail
-          brew install cmake ninja gdown
-          mkdir -p "$WORK/logs" "$PREFIX"
+
+          if [[ -f "$GITHUB_WORKSPACE/Makefile" && \
+                -f "$GITHUB_WORKSPACE/tools/ios_build.sh" && \
+                -f "$GITHUB_WORKSPACE/config/namco/game.env" ]]; then
+            SOURCE_DIR="$GITHUB_WORKSPACE"
+          elif [[ -f "$GITHUB_WORKSPACE/Testing-Namco-Merged-Source.zip" ]]; then
+            SOURCE_DIR="$RUNNER_TEMP/namco-source"
+            rm -rf "$SOURCE_DIR"
+            mkdir -p "$SOURCE_DIR"
+            unzip -tq "$GITHUB_WORKSPACE/Testing-Namco-Merged-Source.zip"
+            unzip -q "$GITHUB_WORKSPACE/Testing-Namco-Merged-Source.zip" -d "$SOURCE_DIR"
+          else
+            echo "::error::Could not find the expanded project or Testing-Namco-Merged-Source.zip."
+            exit 1
+          fi
+
+          for required in Makefile tools/ios_build.sh tools/env.sh ios/CMakeLists.txt \
+                          ios/project.yml CMakeLists.txt config/namco/game.env \
+                          config/namco/app.env config/namco/xbe_facts.h \
+                          src/games/namco/recomp_manual.c namco/generated/recomp_types.h \
+                          namco/generated/recomp_funcs.h namco/generated/recomp_dispatch.c; do
+            [[ -f "$SOURCE_DIR/$required" ]] || {
+              echo "::error::Missing required project file: $required"
+              exit 1
+            }
+          done
+
+          echo "SOURCE_DIR=$SOURCE_DIR" >> "$GITHUB_ENV"
+          echo "Located project at: $SOURCE_DIR"
+
+      - name: Verify Xcode and install missing build tools
+        shell: bash
+        run: |
+          set -euo pipefail
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
 
-      - name: Download generated-C archive
+          command -v cmake >/dev/null 2>&1 || brew install cmake
+          command -v ninja >/dev/null 2>&1 || brew install ninja
+          command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
+
+          cmake --version
+          ninja --version
+          xcodegen --version
+
+      - name: Prepare SDL2 source required by the existing MC3 iOS builder
         shell: bash
         run: |
           set -euo pipefail
-          ARCHIVE="$WORK/namco.zip"
-          gdown "${{ inputs.archive_drive_id }}" -O "$ARCHIVE"
-          test -s "$ARCHIVE"
-          unzip -t "$ARCHIVE" > /dev/null
-          mkdir -p "$WORK/namco"
-          unzip -q "$ARCHIVE" -d "$WORK/namco"
-          echo "generated C files: $(find "$WORK/namco" -name 'recomp_*.c' | wc -l)"
+          SDL_DIR="$RUNNER_TEMP/SDL2-2.32.10"
+          rm -rf "$SDL_DIR"
+          git clone --depth 1 --branch release-2.32.10 \
+            https://github.com/libsdl-org/SDL.git "$SDL_DIR"
+          test -f "$SDL_DIR/CMakeLists.txt"
+          echo "MC3_SDL_DIR=$SDL_DIR" >> "$GITHUB_ENV"
 
-      - name: Resolve pinned xboxrecomp commit
-        id: pin
+      - name: Stage and verify the existing Namco generated code
         shell: bash
         run: |
           set -euo pipefail
-          F="$(find "$WORK/namco" -name xboxrecomp-commit.txt -print -quit)"
-          test -n "$F"
-          C="$(tr -d '[:space:]' < "$F")"
-          [[ "$C" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad commit '$C'"; exit 1; }
-          echo "commit=$C" >> "$GITHUB_OUTPUT"
+          cd "$SOURCE_DIR"
 
-      - name: Check out xboxrecomp at pinned commit
+          CHUNK_COUNT=$(find namco/generated -maxdepth 1 \
+            -type f -name 'recomp_[0-9][0-9][0-9][0-9].c' | wc -l | tr -d ' ')
+          [[ "$CHUNK_COUNT" == "23" ]] || {
+            echo "::error::Expected 23 generated Namco C chunks; found $CHUNK_COUNT."
+            exit 1
+          }
+
+          rm -rf work-namco/gen
+          mkdir -p work-namco/gen
+          cp -R namco/generated/. work-namco/gen/
+
+          test -s work-namco/gen/recomp_types.h
+          test -s work-namco/gen/recomp_funcs.h
+          test -s work-namco/gen/recomp_dispatch.c
+          test -s work-namco/gen/recomp_stubs_unresolved.c
+
+          echo "Namco generated chunks: $CHUNK_COUNT"
+          echo "Generated source size: $(du -sh work-namco/gen | awk '{print $1}')"
+          echo "MC3 game selection: $GAME"
+          echo "Namco work directory: $SOURCE_DIR/work-namco"
+
+      - name: Build the existing MC3 iOS device app for Namco
         shell: bash
         run: |
           set -euo pipefail
-          git clone --filter=blob:none https://github.com/sp00nznet/xboxrecomp.git "$WORK/xboxrecomp"
-          git -C "$WORK/xboxrecomp" fetch --depth 1 origin "${{ steps.pin.outputs.commit }}"
-          git -C "$WORK/xboxrecomp" checkout --detach FETCH_HEAD
-          test "$(git -C "$WORK/xboxrecomp" rev-parse HEAD)" = "${{ steps.pin.outputs.commit }}"
-          git -C "$WORK/xboxrecomp" submodule update --init --recursive
+          cd "$SOURCE_DIR"
+          make ios GAME=namco JOBS=2
 
-      - name: Build SDL2 for iOS arm64
-        id: sdl2
-        continue-on-error: true
+      - name: Validate app and package unsigned IPA
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+
+          APP="$SOURCE_DIR/work-namco/ios/iphoneos/Namco Museum.app"
+          [[ -d "$APP" ]] || {
+            echo "::error::The iOS builder did not produce the expected app: $APP"
+            find "$SOURCE_DIR/work-namco/ios/iphoneos" -maxdepth 4 -print 2>/dev/null || true
+            exit 1
+          }
+
+          INFO="$APP/Info.plist"
+          [[ -s "$INFO" ]]
+          plutil -lint "$INFO"
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO")
+          EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$INFO")
+          [[ -n "$BUNDLE_ID" && -n "$EXECUTABLE" ]]
+          [[ -f "$APP/$EXECUTABLE" ]]
+          ARCHS=$(lipo -archs "$APP/$EXECUTABLE")
+          [[ " $ARCHS " == *" arm64 "* ]] || {
+            echo "::error::Expected an arm64 iOS executable; found: $ARCHS"
+            exit 1
+          }
+
+          rm -rf "$RUNNER_TEMP/namco-ipa-package" "$GITHUB_WORKSPACE/Payload" \
+            "$GITHUB_WORKSPACE/NamcoMuseum.ipa" "$GITHUB_WORKSPACE/NamcoMuseum.ipa.sha256"
+          mkdir -p "$RUNNER_TEMP/namco-ipa-package/Payload"
+          ditto "$APP" "$RUNNER_TEMP/namco-ipa-package/Payload/Namco Museum.app"
+          (cd "$RUNNER_TEMP/namco-ipa-package" && \
+            /usr/bin/zip -qry "$GITHUB_WORKSPACE/NamcoMuseum.ipa" Payload)
+
+          test -s "$GITHUB_WORKSPACE/NamcoMuseum.ipa"
+          shasum -a 256 "$GITHUB_WORKSPACE/NamcoMuseum.ipa" \
+            | tee "$GITHUB_WORKSPACE/NamcoMuseum.ipa.sha256"
+
           {
-            git clone --depth 1 --branch "${{ inputs.sdl2_tag }}" https://github.com/libsdl-org/SDL.git "$WORK/SDL" &&
-            cmake -S "$WORK/SDL" -B "$WORK/sdl-build" -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_SYSTEM_NAME=iOS \
-              -DCMAKE_OSX_SYSROOT=iphoneos \
-              -DCMAKE_OSX_ARCHITECTURES=arm64 \
-              -DCMAKE_OSX_DEPLOYMENT_TARGET="${{ inputs.deployment_target }}" \
-              -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
-              -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TEST=OFF \
-              -DCMAKE_INSTALL_PREFIX="$PREFIX" &&
-            cmake --build "$WORK/sdl-build" --parallel 3 &&
-            cmake --install "$WORK/sdl-build"
-          } 2>&1 | tee "$WORK/logs/sdl2.log"
-          exit "${PIPESTATUS[0]}"
-
-      - name: Build OpenSSL for iOS arm64
-        id: openssl
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -uo pipefail
-          {
-            git clone --depth 1 --branch "${{ inputs.openssl_tag }}" https://github.com/openssl/openssl.git "$WORK/openssl" &&
-            cd "$WORK/openssl" &&
-            IPHONEOS_DEPLOYMENT_TARGET="${{ inputs.deployment_target }}" \
-              ./Configure ios64-xcrun no-shared no-tests no-module \
-                --prefix="$PREFIX" --openssldir="$PREFIX/ssl" &&
-            make -j3 build_libs &&
-            make install_dev
-          } 2>&1 | tee "$WORK/logs/openssl.log"
-          exit "${PIPESTATUS[0]}"
-
-      - name: Create stub epoxy (diagnostic only)
-        shell: bash
-        run: |
-          set -euo pipefail
-          # libepoxy cannot work on iOS (it dlopens desktop GL). This stub only
-          # lets CMake configure so the compiler shows exactly which desktop-GL
-          # calls in d3d8_gl.c have no OpenGL ES equivalent. It is NOT a fix.
-          mkdir -p "$PREFIX/include/epoxy" "$PREFIX/lib/pkgconfig"
-          cat > "$PREFIX/include/epoxy/gl.h" <<'EOF'
-          #pragma once
-          #include <OpenGLES/ES3/gl.h>
-          #include <OpenGLES/ES3/glext.h>
-          EOF
-          sed -i '' 's/^          //' "$PREFIX/include/epoxy/gl.h"
-          cat > "$PREFIX/lib/pkgconfig/epoxy.pc" <<EOF
-          prefix=$PREFIX
-          Name: epoxy
-          Description: iOS diagnostic stub (OpenGL ES)
-          Version: 1.5.10
-          Cflags: -I$PREFIX/include
-          Libs: -framework OpenGLES
-          EOF
-          sed -i '' 's/^          //' "$PREFIX/lib/pkgconfig/epoxy.pc"
-
-      - name: Apply iOS compatibility patches (CI checkout only)
-        shell: bash
-        run: |
-          set -euo pipefail
-          RT="$WORK/xboxrecomp"
-
-          # 1) mach_vm.h is "unsupported" on iOS. vm_map() from <mach/vm_map.h>
-          #    has the same signature and is available, so swap the names.
-          #    (win32_compat.c uses it for a fixed, no-replace VirtualAlloc.)
-          perl -pi -e '
-            s{#include <mach/mach_vm.h>}{#include <mach/mach.h>\n#include <mach/vm_map.h>};
-            s/\bmach_vm_map\b/vm_map/g;
-            s/\bmach_vm_address_t\b/vm_address_t/g;
-            s/\bmach_vm_size_t\b/vm_size_t/g;
-          ' "$RT/src/platform/win32_compat.c"
-
-          # 2) Desktop-GL names that OpenGL ES spells differently. Injected with
-          #    -include so the runtime source stays untouched.
-          cat > "$WORK/ios_gl_compat.h" <<'EOF'
-          #pragma once
-          #define GLES_SILENCE_DEPRECATION 1
-          #define glClearDepth glClearDepthf
-          #define glDepthRange glDepthRangef
-          /* BGRA + UNSIGNED_INT_8_8_8_8_REV is byte order B,G,R,A on little-endian,
-             which ES expresses as BGRA + UNSIGNED_BYTE. */
-          #define GL_UNSIGNED_INT_8_8_8_8_REV 0x1401
-          EOF
-          sed -i '' 's/^          //' "$WORK/ios_gl_compat.h"
-
-          mkdir -p "$WORK/logs"
-          {
-            echo "remaining mach_vm references in win32_compat.c:"
-            grep -n 'mach_vm' "$RT/src/platform/win32_compat.c" || echo "(none)"
-          } | tee "$WORK/logs/patches.log"
-
-      - name: Configure runtime for iOS
-        id: configure
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -uo pipefail
-          export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
-          cmake -S "$WORK/xboxrecomp" -B "$WORK/rt-build" -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT=iphoneos \
-            -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET="${{ inputs.deployment_target }}" \
-            -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
-            -DCMAKE_PREFIX_PATH="$PREFIX" \
-            -DCMAKE_FIND_ROOT_PATH="$PREFIX" \
-            -DCMAKE_C_FLAGS="-include $WORK/ios_gl_compat.h" \
-            -DOPENSSL_ROOT_DIR="$PREFIX" \
-            -DOPENSSL_USE_STATIC_LIBS=ON \
-            -DOPENSSL_INCLUDE_DIR="$PREFIX/include" \
-            -DOPENSSL_CRYPTO_LIBRARY="$PREFIX/lib/libcrypto.a" \
-            -DOPENSSL_SSL_LIBRARY="$PREFIX/lib/libssl.a" \
-            2>&1 | tee "$WORK/logs/configure.log"
-          exit "${PIPESTATUS[0]}"
-
-      - name: Build runtime (collect all errors)
-        id: compile
-        if: steps.configure.outcome == 'success'
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -uo pipefail
-          # -k 0: keep going so we see every failing file, not just the first
-          ninja -C "$WORK/rt-build" -k 0 2>&1 | tee "$WORK/logs/build.log"
-          exit "${PIPESTATUS[0]}"
-
-      - name: Summarize results
-        if: always()
-        shell: bash
-        run: |
-          set -uo pipefail
-          L="$WORK/logs"
-          {
-            echo "# Namco iOS build attempt"
+            echo "## Namco Museum unsigned iOS package"
             echo
-            echo "- SDL2 (iOS arm64): ${{ steps.sdl2.outcome }}"
-            echo "- OpenSSL (iOS arm64): ${{ steps.openssl.outcome }}"
-            echo "- Runtime configure: ${{ steps.configure.outcome }}"
-            echo "- Runtime build: ${{ steps.compile.outcome }}"
-            echo "- Pinned runtime: ${{ steps.pin.outputs.commit }}"
-            echo
-            if [[ -f "$L/configure.log" ]]; then
-              echo "## CMake errors"
-              grep -nE 'CMake Error|Could NOT find|not found' "$L/configure.log" | head -40 || true
-              echo
-            fi
-            if [[ -f "$L/build.log" ]]; then
-              echo "## Compile errors by file (count)"
-              grep -E 'error:' "$L/build.log" | sed -E 's/^([^:]+):[0-9]+:[0-9]+: error:.*/\1/' \
-                | sed "s#$WORK/xboxrecomp/##" | sort | uniq -c | sort -rn | head -40 || true
-              echo
-              echo "## Most common error messages"
-              grep -E 'error:' "$L/build.log" | sed -E 's/^[^:]+:[0-9]+:[0-9]+: error: //' \
-                | sort | uniq -c | sort -rn | head -30 || true
-            fi
-          } | tee "$L/summary.md" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Bundle identifier: \\`$BUNDLE_ID\\`"
+            echo "- Executable architecture(s): \\`$ARCHS\\`"
+            echo "- IPA size: $(du -h "$GITHUB_WORKSPACE/NamcoMuseum.ipa" | awk '{print $1}')"
+            echo "- Signing: disabled; ready for your own signing workflow"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload logs
+      - name: Upload unsigned IPA and build diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: namco-ios-build-logs
-          path: ${{ env.WORK }}/logs/
+          name: namco-museum-unsigned-ipa-${{ github.run_number }}
+          path: |
+            NamcoMuseum.ipa
+            NamcoMuseum.ipa.sha256
+            ${{ runner.temp }}/namco-ipa-package/**
+            ${{ env.SOURCE_DIR }}/work-namco/logs/**
+            ${{ env.SOURCE_DIR }}/work-namco/ios/iphoneos/xcode/Logs/Build/**
           if-no-files-found: warn
           retention-days: 30
-
