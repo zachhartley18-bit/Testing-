@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - '.github/workflows/namco-ios-build.yml'
+      - 'Testing-Namco-Merged-Source-UPDATED.zip'
       - 'Testing-Namco-Merged-Source.zip'
 
 permissions:
@@ -42,15 +43,28 @@ jobs:
                 -f "$GITHUB_WORKSPACE/tools/ios_build.sh" && \
                 -f "$GITHUB_WORKSPACE/config/namco/game.env" ]]; then
             SOURCE_DIR="$GITHUB_WORKSPACE"
-          elif [[ -f "$GITHUB_WORKSPACE/Testing-Namco-Merged-Source.zip" ]]; then
+            echo "Using expanded source tree."
+          else
+            UPDATED_ARCHIVE="$GITHUB_WORKSPACE/Testing-Namco-Merged-Source-UPDATED.zip"
+            ORIGINAL_ARCHIVE="$GITHUB_WORKSPACE/Testing-Namco-Merged-Source.zip"
+
+            if [[ -f "$UPDATED_ARCHIVE" ]]; then
+              SOURCE_ARCHIVE="$UPDATED_ARCHIVE"
+              echo "Using updated source archive: $(basename "$SOURCE_ARCHIVE")"
+            elif [[ -f "$ORIGINAL_ARCHIVE" ]]; then
+              SOURCE_ARCHIVE="$ORIGINAL_ARCHIVE"
+              echo "::warning::Updated archive not found. Falling back to the original archive."
+            else
+              echo "::error::Neither Testing-Namco-Merged-Source-UPDATED.zip nor Testing-Namco-Merged-Source.zip was found."
+              exit 1
+            fi
+
             SOURCE_DIR="$RUNNER_TEMP/namco-source"
             rm -rf "$SOURCE_DIR"
             mkdir -p "$SOURCE_DIR"
-            unzip -tq "$GITHUB_WORKSPACE/Testing-Namco-Merged-Source.zip"
-            unzip -q "$GITHUB_WORKSPACE/Testing-Namco-Merged-Source.zip" -d "$SOURCE_DIR"
-          else
-            echo "::error::Could not find the expanded project or Testing-Namco-Merged-Source.zip."
-            exit 1
+
+            unzip -tq "$SOURCE_ARCHIVE"
+            unzip -q "$SOURCE_ARCHIVE" -d "$SOURCE_DIR"
           fi
 
           REQUIRED_FILES=(
@@ -199,8 +213,6 @@ jobs:
           shasum -a 256 "$GITHUB_WORKSPACE/NamcoMuseum.ipa" \
             | tee "$GITHUB_WORKSPACE/NamcoMuseum.ipa.sha256"
 
-          echo "NAMCO_PACKAGE_DIR=$PACKAGE_DIR" >> "$GITHUB_ENV"
-
           {
             echo "## Namco Museum unsigned iOS package"
             echo
@@ -228,8 +240,7 @@ jobs:
           name: namco-museum-build-diagnostics-${{ github.run_number }}
           path: |
             ${{ runner.temp }}/namco-source/**
-            ${{ runner.temp }}/namco-ipa-package/**
             ${{ github.workspace }}/work-namco/logs/**
             ${{ github.workspace }}/work-namco/ios/iphoneos/xcode/Logs/Build/**
           if-no-files-found: warn
-          retention-days: 14j
+          retention-days: 14
