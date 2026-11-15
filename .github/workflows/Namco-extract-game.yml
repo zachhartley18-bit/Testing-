@@ -43,7 +43,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/namco/input"
 
-          "$RUNNER_TEMP/gdown-venv/bin/gdown" --fuzzy "https://drive.google.com/file/d/1mHlZ2hqkAexh89G46LNB0dpdgH2MaO11/view?usp=drivesdk" -O "$RUNNER_TEMP/namco/input/namco-museum.xiso.iso"
+          "$RUNNER_TEMP/gdown-venv/bin/gdown" "1mHlZ2hqkAexh89G46LNB0dpdgH2MaO11" -O "$RUNNER_TEMP/namco/input/namco-museum.xiso.iso"
 
           if [ ! -s "$RUNNER_TEMP/namco/input/namco-museum.xiso.iso" ]; then
             echo "The Namco Museum XISO download is missing or empty."
