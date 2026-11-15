@@ -232,4 +232,4 @@ jobs:
             ${{ github.workspace }}/work-namco/logs/**
             ${{ github.workspace }}/work-namco/ios/iphoneos/xcode/Logs/Build/**
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 14j
