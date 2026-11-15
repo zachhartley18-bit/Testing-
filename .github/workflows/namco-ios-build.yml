@@ -19,6 +19,7 @@ jobs:
     name: Build and package unsigned Namco Museum IPA
     runs-on: xcode-27
     timeout-minutes: 180
+
     env:
       GAME: namco
       JOBS: '2'
@@ -27,7 +28,7 @@ jobs:
       MC3_BUILD_ID: ${{ github.sha }}
 
     steps:
-      - name: Check out repository
+      - name: Check out Namco integration source
         uses: actions/checkout@v4
         with:
           ref: namco-integration
@@ -48,19 +49,36 @@ jobs:
             unzip -tq "$GITHUB_WORKSPACE/Testing-Namco-Merged-Source.zip"
             unzip -q "$GITHUB_WORKSPACE/Testing-Namco-Merged-Source.zip" -d "$SOURCE_DIR"
           else
-            echo "::error::Could not find the expanded MC3/Namco project or Testing-Namco-Merged-Source.zip at the repository root."
+            echo "::error::Could not find the expanded project or Testing-Namco-Merged-Source.zip."
             exit 1
           fi
 
-          for required in Makefile tools/ios_build.sh tools/env.sh ios/CMakeLists.txt \
-                          ios/project.yml CMakeLists.txt config/namco/game.env \
-                          config/namco/app.env config/namco/xbe_facts.h \
-                          src/games/namco/recomp_manual.c namco/generated/recomp_types.h \
-                          namco/generated/recomp_funcs.h namco/generated/recomp_dispatch.c; do
-            [[ -f "$SOURCE_DIR/$required" ]] || {
+          REQUIRED_FILES=(
+            Makefile
+            tools/ios_build.sh
+            tools/env.sh
+            ios/CMakeLists.txt
+            ios/project.yml
+            CMakeLists.txt
+            config/namco/game.env
+            config/namco/app.env
+            config/namco/xbe_facts.h
+            src/games/namco/recomp_manual.c
+            src/games/namco/xbox_port_io.c
+            src/games/namco/xbox_port_io.h
+            src/games/namco/xbox_port_io_xemu.c
+            NAMCO_PORT_IO_INTEGRATION.md
+            namco/generated/recomp_types.h
+            namco/generated/recomp_funcs.h
+            namco/generated/recomp_dispatch.c
+            namco/generated/recomp_stubs_unresolved.c
+          )
+
+          for required in "${REQUIRED_FILES[@]}"; do
+            if [[ ! -f "$SOURCE_DIR/$required" ]]; then
               echo "::error::Missing required project file: $required"
               exit 1
-            }
+            fi
           done
 
           echo "SOURCE_DIR=$SOURCE_DIR" >> "$GITHUB_ENV"
@@ -70,6 +88,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
 
@@ -81,29 +100,34 @@ jobs:
           ninja --version
           xcodegen --version
 
-      - name: Prepare SDL2 source required by the existing MC3 iOS builder
+      - name: Prepare SDL2 source
         shell: bash
         run: |
           set -euo pipefail
+
           SDL_DIR="$RUNNER_TEMP/SDL2-2.32.10"
           rm -rf "$SDL_DIR"
+
           git clone --depth 1 --branch release-2.32.10 \
             https://github.com/libsdl-org/SDL.git "$SDL_DIR"
+
           test -f "$SDL_DIR/CMakeLists.txt"
           echo "MC3_SDL_DIR=$SDL_DIR" >> "$GITHUB_ENV"
 
-      - name: Stage and verify the existing Namco generated code
+      - name: Stage and verify Namco generated code
         shell: bash
         run: |
           set -euo pipefail
           cd "$SOURCE_DIR"
 
           CHUNK_COUNT=$(find namco/generated -maxdepth 1 \
-            -type f -name 'recomp_[0-9][0-9][0-9][0-9].c' | wc -l | tr -d ' ')
-          [[ "$CHUNK_COUNT" == "23" ]] || {
+            -type f -name 'recomp_[0-9][0-9][0-9][0-9].c' \
+            | wc -l | tr -d ' ')
+
+          if [[ "$CHUNK_COUNT" != "23" ]]; then
             echo "::error::Expected 23 generated Namco C chunks; found $CHUNK_COUNT."
             exit 1
-          }
+          fi
 
           rm -rf work-namco/gen
           mkdir -p work-namco/gen
@@ -114,12 +138,10 @@ jobs:
           test -s work-namco/gen/recomp_dispatch.c
           test -s work-namco/gen/recomp_stubs_unresolved.c
 
-          echo "Namco generated chunks: $CHUNK_COUNT"
+          echo "Verified generated C chunks: $CHUNK_COUNT"
           echo "Generated source size: $(du -sh work-namco/gen | awk '{print $1}')"
-          echo "MC3 game selection: $GAME"
-          echo "Namco work directory: $SOURCE_DIR/work-namco"
 
-      - name: Build the existing MC3 iOS device app for Namco
+      - name: Build Namco Museum for iOS
         shell: bash
         run: |
           set -euo pipefail
@@ -133,55 +155,81 @@ jobs:
           cd "$SOURCE_DIR"
 
           APP="$SOURCE_DIR/work-namco/ios/iphoneos/Namco Museum.app"
-          [[ -d "$APP" ]] || {
-            echo "::error::The iOS builder did not produce the expected app: $APP"
-            find "$SOURCE_DIR/work-namco/ios/iphoneos" -maxdepth 4 -print 2>/dev/null || true
+
+          if [[ ! -d "$APP" ]]; then
+            echo "::error::Expected iOS app was not produced: $APP"
+            find "$SOURCE_DIR/work-namco/ios/iphoneos" \
+              -maxdepth 4 -print 2>/dev/null || true
             exit 1
-          }
+          fi
 
           INFO="$APP/Info.plist"
           [[ -s "$INFO" ]]
           plutil -lint "$INFO"
-          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO")
-          EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$INFO")
-          [[ -n "$BUNDLE_ID" && -n "$EXECUTABLE" ]]
-          [[ -f "$APP/$EXECUTABLE" ]]
-          ARCHS=$(lipo -archs "$APP/$EXECUTABLE")
-          [[ " $ARCHS " == *" arm64 "* ]] || {
-            echo "::error::Expected an arm64 iOS executable; found: $ARCHS"
-            exit 1
-          }
 
-          rm -rf "$RUNNER_TEMP/namco-ipa-package" "$GITHUB_WORKSPACE/Payload" \
-            "$GITHUB_WORKSPACE/NamcoMuseum.ipa" "$GITHUB_WORKSPACE/NamcoMuseum.ipa.sha256"
-          mkdir -p "$RUNNER_TEMP/namco-ipa-package/Payload"
-          ditto "$APP" "$RUNNER_TEMP/namco-ipa-package/Payload/Namco Museum.app"
-          (cd "$RUNNER_TEMP/namco-ipa-package" && \
-            /usr/bin/zip -qry "$GITHUB_WORKSPACE/NamcoMuseum.ipa" Payload)
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleIdentifier' "$INFO")
+          EXECUTABLE=$(/usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleExecutable' "$INFO")
+
+          [[ -n "$BUNDLE_ID" ]]
+          [[ -n "$EXECUTABLE" ]]
+          [[ -f "$APP/$EXECUTABLE" ]]
+
+          ARCHS=$(lipo -archs "$APP/$EXECUTABLE")
+
+          if [[ " $ARCHS " != *" arm64 "* ]]; then
+            echo "::error::Expected arm64 executable; found: $ARCHS"
+            exit 1
+          fi
+
+          PACKAGE_DIR="$RUNNER_TEMP/namco-ipa-package"
+          rm -rf "$PACKAGE_DIR"
+          mkdir -p "$PACKAGE_DIR/Payload"
+
+          ditto "$APP" "$PACKAGE_DIR/Payload/Namco Museum.app"
+
+          (
+            cd "$PACKAGE_DIR"
+            /usr/bin/zip -qry "$GITHUB_WORKSPACE/NamcoMuseum.ipa" Payload
+          )
 
           test -s "$GITHUB_WORKSPACE/NamcoMuseum.ipa"
+
           shasum -a 256 "$GITHUB_WORKSPACE/NamcoMuseum.ipa" \
             | tee "$GITHUB_WORKSPACE/NamcoMuseum.ipa.sha256"
+
+          echo "NAMCO_PACKAGE_DIR=$PACKAGE_DIR" >> "$GITHUB_ENV"
 
           {
             echo "## Namco Museum unsigned iOS package"
             echo
             echo "- Bundle identifier: \`$BUNDLE_ID\`"
-            echo "- Executable architecture(s): \`$ARCHS\`"
+            echo "- Architecture(s): \`$ARCHS\`"
             echo "- IPA size: $(du -h "$GITHUB_WORKSPACE/NamcoMuseum.ipa" | awk '{print $1}')"
-            echo "- Signing: disabled; ready for your own signing workflow"
+            echo "- Signing: disabled"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload unsigned IPA and build diagnostics
-        if: always()
+      - name: Upload unsigned IPA
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: namco-museum-unsigned-ipa-${{ github.run_number }}
           path: |
             NamcoMuseum.ipa
             NamcoMuseum.ipa.sha256
-            ${{ runner.temp }}/namco-ipa-package/**
-            ${{ env.SOURCE_DIR }}/work-namco/logs/**
-            ${{ env.SOURCE_DIR }}/work-namco/ios/iphoneos/xcode/Logs/Build/**
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: namco-museum-build-diagnostics-${{ github.run_number }}
+          path: |
+            ${{ runner.temp }}/namco-source/**
+            ${{ runner.temp }}/namco-ipa-package/**
+            ${{ github.workspace }}/work-namco/logs/**
+            ${{ github.workspace }}/work-namco/ios/iphoneos/xcode/Logs/Build/**
+          if-no-files-found: warn
+          retention-days: 14
