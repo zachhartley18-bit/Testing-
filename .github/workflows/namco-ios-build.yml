@@ -155,6 +155,35 @@ jobs:
           echo "Verified generated C chunks: $CHUNK_COUNT"
           echo "Generated source size: $(du -sh work-namco/gen | awk '{print $1}')"
 
+      - name: Move runtime scratch areas above the Namco image
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+
+          # Namco Museum's image ends at 0x00761620. The runtime keeps kernel
+          # data exports, a PRCB stand-in and a fake TLS struct at fixed
+          # addresses that sit inside that image (0x740000, 0x761000,
+          # 0x760000, 0x700000) and overwrites the game's own data. Move
+          # them into the free gap below the TLS block (0x770000).
+          H=xboxrecomp/src/kernel/xbox_memory_layout.h
+          C=xboxrecomp/src/kernel/xbox_memory_layout.c
+          for f in "$H" "$C"; do
+            test -f "$f" || { echo "::error::$f not found: runtime is not where this step expects"; exit 1; }
+          done
+
+          sed -i '' -E 's/^(#define XBOX_KERNEL_DATA_BASE +)0x00740000/\10x00762000/' "$H"
+          sed -i '' -E 's/(#define FAKE_PRCB_VA +)0x00761000/\10x00763000/' "$C"
+          sed -i '' -E 's/(#define FAKE_TLS_VA +)0x00760000/\10x00764000/' "$C"
+          sed -i '' -E 's/(#define FAKE_RWDATA_VA +)0x00700000/\10x00766000/' "$C"
+
+          # Fail loudly if the constants are not what we expect afterwards.
+          grep -Eq 'XBOX_KERNEL_DATA_BASE +0x00762000' "$H"
+          grep -Eq 'FAKE_PRCB_VA +0x00763000'          "$C"
+          grep -Eq 'FAKE_TLS_VA +0x00764000'           "$C"
+          grep -Eq 'FAKE_RWDATA_VA +0x00766000'        "$C"
+          echo "Runtime scratch areas now above the image (0x762000-0x770000)."
+
       - name: Build Namco Museum for iOS
         shell: bash
         run: |
