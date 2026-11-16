@@ -229,6 +229,17 @@ jobs:
           grep -Eq 'FAKE_RWDATA_VA +0x00766000'        "$C"
           echo "Runtime scratch areas now above the image (0x762000-0x770000)."
 
+      - name: Diagnostic defaults (longer kernel call log, lighter render scale)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          F=src/ios_host.c
+          # Placed before the app's own defaults, so these win; the settings file still overrides.
+          perl -0pi -e 's|(\s*SDL_SetHint\(SDL_HINT_ORIENTATIONS,)|\n    setenv("RECOMP_KERNEL_LOG_BUDGET", "6000", 0);   /* keep return addresses of the stalled loop */\n    setenv("RECOMP_GL_SCALE", "1.0", 0);             /* less GPU heat while bringing the game up */$1|' "$F"
+          grep -q 'RECOMP_KERNEL_LOG_BUDGET' "$F" || { echo "::error::diagnostic defaults were not inserted"; exit 1; }
+          grep -n 'RECOMP_KERNEL_LOG_BUDGET\|RECOMP_GL_SCALE' "$F"
+
       - name: Build Namco Museum for iOS
         shell: bash
         run: |
