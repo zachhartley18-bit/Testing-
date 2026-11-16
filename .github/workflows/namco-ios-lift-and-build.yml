@@ -196,6 +196,40 @@ jobs:
           print(len(seeds), "seeds")
           EOF
 
+      - name: Name the GPU semaphore for the D3D fence wait
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          m=src/games/namco/recomp_manual.c
+          if ! grep -q "sub_005AED70_gen" "$m"; then
+            cat >> "$m" <<'CEOF'
+
+          /* D3D fence wait 0x005AED70: spins until the GPU-written semaphore at
+           * *(device + 0x34) reaches the fence at device + 0x30. The NV2A executor
+           * only writes BACK_END_WRITE_SEMAPHORE_RELEASE values once the address is
+           * named, so without this the wait never ends and nothing is drawn. Name it
+           * on the first wait, then run the original (its kick-off queues releases). */
+          extern void sub_005AED70_gen(void);
+          extern void nv2a_pb_set_semaphore_target(uint32_t guest_va);
+          void sub_005AED70(void)
+          {
+              static uint32_t sem_va;
+              if (!sem_va) {
+                  uint32_t device = MEM32(0x005B77A8u);
+                  uint32_t sem = device ? MEM32(device + 0x34u) : 0;
+                  if (sem) {
+                      sem_va = sem;
+                      nv2a_pb_set_semaphore_target(sem_va);
+                      fprintf(stderr, "[D3D] GPU semaphore at 0x%08X (device 0x%08X)\n", sem_va, device);
+                  }
+              }
+              sub_005AED70_gen();
+          }
+          CEOF
+          fi
+          grep -c sub_005AED70_gen "$m"
+
       - name: Lift the Xbox executable with the project's own lifter
         shell: bash
         run: |
@@ -381,3 +415,4 @@ jobs:
             ${{ github.workspace }}/work-namco/ios/iphoneos/xcode/Logs/Build/**
           if-no-files-found: warn
           retention-days: 14
+
