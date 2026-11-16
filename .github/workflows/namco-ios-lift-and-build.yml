@@ -240,6 +240,39 @@ jobs:
           grep -q 'RECOMP_KERNEL_LOG_BUDGET' "$F" || { echo "::error::diagnostic defaults were not inserted"; exit 1; }
           grep -n 'RECOMP_KERNEL_LOG_BUDGET\|RECOMP_GL_SCALE' "$F"
 
+      - name: Watchdog also dumps the D3D device structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          python3 - <<'EOF'
+          p = "xboxrecomp/src/kernel/xbox_memory_layout.c"
+          s = open(p).read()
+          anchor = "#undef WD_NV2A\n    }\n"
+          assert s.count(anchor) == 1, "watchdog anchor not found exactly once"
+          dump = anchor + r'''
+          {   /* Namco D3D: device pointer lives at 0x005B77A8 */
+              uint32_t dev = *(const uint32_t *)(mem + 0x5B77A8);
+              fprintf(stderr, "  D3D device=%08X\n", dev);
+              if (dev > 0x10000u && dev < 0x03F00000u) {
+                  uint32_t w, user = *(const uint32_t *)(mem + dev + 0x23BC);
+                  for (w = 0; w < 0x60; w += 16)
+                      fprintf(stderr, "  D3D dev+%02X: %08X %08X %08X %08X\n", w,
+                              *(const uint32_t *)(mem + dev + w), *(const uint32_t *)(mem + dev + w + 4),
+                              *(const uint32_t *)(mem + dev + w + 8), *(const uint32_t *)(mem + dev + w + 12));
+                  fprintf(stderr, "  D3D dev+23BC (USER ptr)=%08X\n", user);
+                  fprintf(stderr, "  D3D dev+4FC=%08X dev+21AC=%08X dev+2568=%08X\n",
+                          *(const uint32_t *)(mem + dev + 0x4FC), *(const uint32_t *)(mem + dev + 0x21AC),
+                          *(const uint32_t *)(mem + dev + 0x2568));
+                  {   uint32_t pb = *(const uint32_t *)(mem + dev + 0x34);
+                      fprintf(stderr, "  D3D *[dev+34]=%08X\n", pb < 0x10000000u ? *(const uint32_t *)(mem + pb) : 0xDEADBEEFu); }
+              }
+          }
+          '''
+          open(p, "w").write(s.replace(anchor, dump))
+          print("watchdog device dump inserted")
+          EOF
+
       - name: Build Namco Museum for iOS
         shell: bash
         run: |
