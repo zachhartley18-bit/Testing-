@@ -1,0 +1,322 @@
+name: Namco Museum iOS IPA (lift in CI)
+
+on:
+  workflow_dispatch:
+    inputs:
+      iso_drive_id:
+        description: "Google Drive file ID of the Namco Museum XISO (kept out of the repo on purpose)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: namco-ios-lift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-ipa:
+    name: Build and package unsigned Namco Museum IPA
+    runs-on: xcode-27
+    timeout-minutes: 180
+
+    env:
+      GAME: namco
+      JOBS: '2'
+      MC3_XCODE_CONFIGURATION: Release
+      MC3_XCODEBUILD_ARGS: 'CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='
+      MC3_BUILD_ID: ${{ github.sha }}
+
+    steps:
+      - name: Check out Namco integration source
+        uses: actions/checkout@v4
+        with:
+          ref: namco-integration
+
+      - name: Locate or extract the merged Namco project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -f "$GITHUB_WORKSPACE/Makefile" && \
+                -f "$GITHUB_WORKSPACE/tools/ios_build.sh" && \
+                -f "$GITHUB_WORKSPACE/config/namco/game.env" ]]; then
+            SOURCE_DIR="$GITHUB_WORKSPACE"
+            echo "Using expanded source tree."
+          else
+            UPDATED_ARCHIVE="$GITHUB_WORKSPACE/Testing-Namco-Merged-Source-UPDATED.zip"
+            ORIGINAL_ARCHIVE="$GITHUB_WORKSPACE/Testing-Namco-Merged-Source.zip"
+
+            if [[ -f "$UPDATED_ARCHIVE" ]]; then
+              SOURCE_ARCHIVE="$UPDATED_ARCHIVE"
+              echo "Using updated source archive: $(basename "$SOURCE_ARCHIVE")"
+            elif [[ -f "$ORIGINAL_ARCHIVE" ]]; then
+              SOURCE_ARCHIVE="$ORIGINAL_ARCHIVE"
+              echo "::warning::Updated archive not found. Falling back to the original archive."
+            else
+              echo "::error::Neither Testing-Namco-Merged-Source-UPDATED.zip nor Testing-Namco-Merged-Source.zip was found."
+              exit 1
+            fi
+
+            SOURCE_DIR="$RUNNER_TEMP/namco-source"
+            rm -rf "$SOURCE_DIR"
+            mkdir -p "$SOURCE_DIR"
+
+            unzip -tq "$SOURCE_ARCHIVE"
+            unzip -q "$SOURCE_ARCHIVE" -d "$SOURCE_DIR"
+          fi
+
+          REQUIRED_FILES=(
+            Makefile
+            tools/ios_build.sh
+            tools/env.sh
+            ios/CMakeLists.txt
+            ios/project.yml
+            CMakeLists.txt
+            config/namco/game.env
+            config/namco/app.env
+            config/namco/xbe_facts.h
+            src/games/namco/recomp_manual.c
+            src/games/namco/xbox_port_io.c
+            src/games/namco/xbox_port_io.h
+            src/games/namco/xbox_port_io_xemu.c
+            NAMCO_PORT_IO_INTEGRATION.md
+            namco/generated/recomp_types.h
+            namco/generated/recomp_funcs.h
+            namco/generated/recomp_dispatch.c
+            namco/generated/recomp_stubs_unresolved.c
+          )
+
+          for required in "${REQUIRED_FILES[@]}"; do
+            if [[ ! -f "$SOURCE_DIR/$required" ]]; then
+              echo "::error::Missing required project file: $required"
+              exit 1
+            fi
+          done
+
+          echo "SOURCE_DIR=$SOURCE_DIR" >> "$GITHUB_ENV"
+          echo "Located project at: $SOURCE_DIR"
+
+      - name: Verify Xcode and install missing build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+          command -v cmake >/dev/null 2>&1 || brew install cmake
+          command -v ninja >/dev/null 2>&1 || brew install ninja
+          command -v xcodegen >/dev/null 2>&1 || brew install xcodegen
+
+          cmake --version
+          ninja --version
+          xcodegen --version
+
+      - name: Prepare SDL2 source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDL_DIR="$RUNNER_TEMP/SDL2-2.32.10"
+          rm -rf "$SDL_DIR"
+
+          git clone --depth 1 --branch release-2.32.10 \
+            https://github.com/libsdl-org/SDL.git "$SDL_DIR"
+
+          test -f "$SDL_DIR/CMakeLists.txt"
+          echo "MC3_SDL_DIR=$SDL_DIR" >> "$GITHUB_ENV"
+
+      - name: Python environment for the lifter
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          export MC3_WORK="$SOURCE_DIR/work-namco"
+          mkdir -p "$MC3_WORK"
+          python3 -m venv "$MC3_WORK/venv"
+          "$MC3_WORK/venv/bin/python3" -m pip install --upgrade pip
+          "$MC3_WORK/venv/bin/python3" -m pip install capstone pillow gdown
+
+      - name: Download Namco Museum XISO
+        shell: bash
+        env:
+          GDRIVE_FILE_ID: ${{ inputs.iso_drive_id }}
+        run: |
+          set -euo pipefail
+          "$SOURCE_DIR/work-namco/venv/bin/python3" -m gdown \
+            "$GDRIVE_FILE_ID" -O "$RUNNER_TEMP/namco.iso"
+          test -s "$RUNNER_TEMP/namco.iso"
+          ls -lh "$RUNNER_TEMP/namco.iso"
+
+      - name: Extract the disc
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          make GAME=namco extract ISO="$RUNNER_TEMP/namco.iso"
+          XBE="$(find . -maxdepth 3 -name default.xbe -not -path './work-namco/*' -print -quit)"
+          test -n "$XBE" || { echo "::error::default.xbe not found after extraction"; exit 1; }
+          echo "Extracted: $XBE ($(stat -f%z "$XBE") bytes)"
+
+      - name: Seed indirect-call targets the static pass missed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          python3 - <<'EOF'
+          import json, os
+          p = "config/namco/seed_functions.json"
+          seeds = json.load(open(p)) if os.path.exists(p) else []
+          have = {s["start"].lower() for s in seeds}
+          for addr, sec in [("0x005F92D1","XPP"),("0x005BDF6D","DSOUND"),("0x005BDF78","DSOUND"),
+                            ("0x005C2849","DSOUND"),("0x005C2854","DSOUND")]:
+              if addr.lower() not in have:
+                  seeds.append({"start": addr, "note": sec + ". [ICALL] Failed to resolve on the iOS run."})
+          os.makedirs("config/namco", exist_ok=True)
+          json.dump(seeds, open(p, "w"), indent=1)
+          print(len(seeds), "seeds")
+          EOF
+
+      - name: Lift the Xbox executable with the project's own lifter
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          make lift GAME=namco
+
+      - name: Check the lift reaches the TIB through XBOX_FS_BASE
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          GEN=work-namco/gen
+          CHUNKS=$(find "$GEN" -maxdepth 1 -name 'recomp_[0-9]*.c' | wc -l | tr -d ' ')
+          HITS=$(cat "$GEN"/recomp_[0-9]*.c | grep -c 'XBOX_FS_BASE' || true)
+          echo "lifted chunks: $CHUNKS; lines using XBOX_FS_BASE: $HITS"
+          if [[ "$HITS" -eq 0 ]]; then
+            echo "::error::The lift never uses XBOX_FS_BASE: fs: accesses would read guest address 0 and crash (the 0xFFFFFFEC fault)."
+            exit 1
+          fi
+
+      - name: Move runtime scratch areas above the Namco image
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+
+          # Namco Museum's image ends at 0x00761620. The runtime keeps kernel
+          # data exports, a PRCB stand-in and a fake TLS struct at fixed
+          # addresses that sit inside that image (0x740000, 0x761000,
+          # 0x760000, 0x700000) and overwrites the game's own data. Move
+          # them into the free gap below the TLS block (0x770000).
+          H=xboxrecomp/src/kernel/xbox_memory_layout.h
+          C=xboxrecomp/src/kernel/xbox_memory_layout.c
+          for f in "$H" "$C"; do
+            test -f "$f" || { echo "::error::$f not found: runtime is not where this step expects"; exit 1; }
+          done
+
+          sed -i '' -E 's/^(#define XBOX_KERNEL_DATA_BASE +)0x00740000/\10x00762000/' "$H"
+          sed -i '' -E 's/(#define FAKE_PRCB_VA +)0x00761000/\10x00763000/' "$C"
+          sed -i '' -E 's/(#define FAKE_TLS_VA +)0x00760000/\10x00764000/' "$C"
+          sed -i '' -E 's/(#define FAKE_RWDATA_VA +)0x00700000/\10x00766000/' "$C"
+
+          # Fail loudly if the constants are not what we expect afterwards.
+          grep -Eq 'XBOX_KERNEL_DATA_BASE +0x00762000' "$H"
+          grep -Eq 'FAKE_PRCB_VA +0x00763000'          "$C"
+          grep -Eq 'FAKE_TLS_VA +0x00764000'           "$C"
+          grep -Eq 'FAKE_RWDATA_VA +0x00766000'        "$C"
+          echo "Runtime scratch areas now above the image (0x762000-0x770000)."
+
+      - name: Build Namco Museum for iOS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          make ios GAME=namco JOBS=2
+
+      - name: Validate app and package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+
+          APP="$SOURCE_DIR/work-namco/ios/iphoneos/Namco Museum.app"
+
+          if [[ ! -d "$APP" ]]; then
+            echo "::error::Expected iOS app was not produced: $APP"
+            find "$SOURCE_DIR/work-namco/ios/iphoneos" \
+              -maxdepth 4 -print 2>/dev/null || true
+            exit 1
+          fi
+
+          INFO="$APP/Info.plist"
+          [[ -s "$INFO" ]]
+          plutil -lint "$INFO"
+
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleIdentifier' "$INFO")
+          EXECUTABLE=$(/usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleExecutable' "$INFO")
+
+          [[ -n "$BUNDLE_ID" ]]
+          [[ -n "$EXECUTABLE" ]]
+          [[ -f "$APP/$EXECUTABLE" ]]
+
+          ARCHS=$(lipo -archs "$APP/$EXECUTABLE")
+
+          if [[ " $ARCHS " != *" arm64 "* ]]; then
+            echo "::error::Expected arm64 executable; found: $ARCHS"
+            exit 1
+          fi
+
+          PACKAGE_DIR="$RUNNER_TEMP/namco-ipa-package"
+          rm -rf "$PACKAGE_DIR"
+          mkdir -p "$PACKAGE_DIR/Payload"
+
+          ditto "$APP" "$PACKAGE_DIR/Payload/Namco Museum.app"
+
+          (
+            cd "$PACKAGE_DIR"
+            /usr/bin/zip -qry "$GITHUB_WORKSPACE/NamcoMuseum.ipa" Payload
+          )
+
+          test -s "$GITHUB_WORKSPACE/NamcoMuseum.ipa"
+
+          shasum -a 256 "$GITHUB_WORKSPACE/NamcoMuseum.ipa" \
+            | tee "$GITHUB_WORKSPACE/NamcoMuseum.ipa.sha256"
+
+          {
+            echo "## Namco Museum unsigned iOS package"
+            echo
+            echo "- Bundle identifier: \`$BUNDLE_ID\`"
+            echo "- Architecture(s): \`$ARCHS\`"
+            echo "- IPA size: $(du -h "$GITHUB_WORKSPACE/NamcoMuseum.ipa" | awk '{print $1}')"
+            echo "- Signing: disabled"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload unsigned IPA
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: namco-museum-unsigned-ipa-${{ github.run_number }}
+          path: |
+            NamcoMuseum.ipa
+            NamcoMuseum.ipa.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: namco-museum-build-diagnostics-${{ github.run_number }}
+          path: |
+            ${{ github.workspace }}/work-namco/logs/**
+            ${{ github.workspace }}/work-namco/analysis/recomp.log
+            ${{ github.workspace }}/work-namco/analysis/xbe_summary.txt
+            ${{ github.workspace }}/config/namco/xbe_facts.h
+            ${{ github.workspace }}/work-namco/ios/iphoneos/xcode/Logs/Build/**
+          if-no-files-found: warn
+          retention-days: 14
