@@ -291,6 +291,35 @@ jobs:
           grep -q 'RECOMP_WATCHDOG_KEEP' "$F" || { echo "::error::diagnostic defaults were not inserted"; exit 1; }
           grep -n 'RECOMP_KERNEL_LOG_BUDGET\|RECOMP_GL_SCALE' "$F"
 
+      - name: Watchdog repeats its snapshot every 10 seconds
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          python3 - <<'PYEOF'
+          import re
+          p = "xboxrecomp/src/kernel/xbox_memory_layout.c"
+          s = open(p).read()
+          pat = re.compile(r"if \(keep && \*keep == '1'\) \{\s*fflush\(stderr\);\s*return 0;\s*\}")
+          new = ("if (keep && *keep == '1') {\n"
+                 "            /* Namco iOS: a freeze after the first snapshot needs its own stack,\n"
+                 "             * so keep sampling every 10 s (20 samples). */\n"
+                 "            int n;\n"
+                 "            for (n = 0; n < 20; n++) {\n"
+                 "                Sleep(10000);\n"
+                 "                xbox_WatchdogDump(\"periodic\");\n"
+                 "            }\n"
+                 "            fflush(stderr);\n"
+                 "            return 0;\n"
+                 "        }")
+          s2, n = pat.subn(lambda m: new, s, count=1)
+          if n != 1:
+              raise SystemExit("watchdog keep block not found")
+          open(p, "w").write(s2)
+          print("patched")
+          PYEOF
+          grep -c 'xbox_WatchdogDump("periodic")' xboxrecomp/src/kernel/xbox_memory_layout.c
+
       - name: Watchdog also dumps the D3D device structure
         shell: bash
         run: |
