@@ -344,6 +344,14 @@ jobs:
                   fprintf(stderr, "  D3D dev+4FC=%08X dev+21AC=%08X dev+2568=%08X\n",
                           *(const uint32_t *)(mem + dev + 0x4FC), *(const uint32_t *)(mem + dev + 0x21AC),
                           *(const uint32_t *)(mem + dev + 0x2568));
+                  /* the busy-wait at 0x005A9D55 polls a slot in dev+0x23C0 (selected by bit 0 of dev+0x257C) */
+                  for (w = 0x2520; w < 0x25A0; w += 16)
+                      fprintf(stderr, "  D3D dev+%04X: %08X %08X %08X %08X\n", w,
+                              *(const uint32_t *)(mem + dev + w), *(const uint32_t *)(mem + dev + w + 4),
+                              *(const uint32_t *)(mem + dev + w + 8), *(const uint32_t *)(mem + dev + w + 12));
+                  fprintf(stderr, "  D3D 23C0 struct: [+1BC]=%08X slot(b=0)@2534=%08X slot(b=1)@2540=%08X\n",
+                          *(const uint32_t *)(mem + dev + 0x257C), *(const uint32_t *)(mem + dev + 0x2534),
+                          *(const uint32_t *)(mem + dev + 0x2540));
                   {   uint32_t pb = *(const uint32_t *)(mem + dev + 0x34);
                       fprintf(stderr, "  D3D *[dev+34]=%08X\n", pb < 0x10000000u ? *(const uint32_t *)(mem + pb) : 0xDEADBEEFu); }
               }
