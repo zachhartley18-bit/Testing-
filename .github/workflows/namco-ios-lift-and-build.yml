@@ -160,6 +160,23 @@ jobs:
           test -n "$XBE" || { echo "::error::default.xbe not found after extraction"; exit 1; }
           echo "Extracted: $XBE ($(stat -f%z "$XBE") bytes)"
 
+      - name: Check the extracted disc is the edition this project was lifted from
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          python3 - <<'EOF'
+          import re, sys
+          raw = open("namco/default.xbe", "rb").read()
+          h = 0xcbf29ce484222325
+          for b in raw:
+              h = ((h ^ b) * 0x100000001b3) & 0xffffffffffffffff
+          want = re.search(r'0x([0-9a-fA-F]{16})ull', open("config/namco/xbe_editions.h").read()).group(1).lower()
+          print("default.xbe: %d bytes, FNV64 %016x (project expects %s, 6955008 bytes on your device)" % (len(raw), h, want))
+          if "%016x" % h != want or len(raw) != 6955008:
+              print("::warning::This ISO's default.xbe is not the one on your device / the one the project was lifted from. The app refuses a disc whose XBE hash differs.")
+          EOF
+
       - name: Seed indirect-call targets the static pass missed
         shell: bash
         run: |
