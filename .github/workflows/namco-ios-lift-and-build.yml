@@ -287,8 +287,8 @@ jobs:
           cd "$SOURCE_DIR"
           F=src/ios_host.c
           # Placed before the app's own defaults, so these win; the settings file still overrides.
-          perl -0pi -e 's|(\s*SDL_SetHint\(SDL_HINT_ORIENTATIONS,)|\n    setenv("RECOMP_KERNEL_LOG_BUDGET", "6000", 0);   /* keep return addresses of the stalled loop */\n    setenv("RECOMP_GL_SCALE", "1.0", 0);             /* less GPU heat while bringing the game up */\n    setenv("RECOMP_WATCHDOG_SECS", "8", 0);          /* dump the guest call stack when nothing progresses */$1|' "$F"
-          grep -q 'RECOMP_KERNEL_LOG_BUDGET' "$F" || { echo "::error::diagnostic defaults were not inserted"; exit 1; }
+          perl -0pi -e 's|(\s*SDL_SetHint\(SDL_HINT_ORIENTATIONS,)|\n    setenv("RECOMP_KERNEL_LOG_BUDGET", "6000", 0);   /* keep return addresses of the stalled loop */\n    setenv("RECOMP_GL_SCALE", "1.0", 0);             /* less GPU heat while bringing the game up */\n    setenv("RECOMP_WATCHDOG_SECS", "8", 0);          /* one snapshot of the guest call stack */\n    setenv("RECOMP_WATCHDOG_KEEP", "1", 0);          /* snapshot only: without this the watchdog calls _exit(3) after dumping */$1|' "$F"
+          grep -q 'RECOMP_WATCHDOG_KEEP' "$F" || { echo "::error::diagnostic defaults were not inserted"; exit 1; }
           grep -n 'RECOMP_KERNEL_LOG_BUDGET\|RECOMP_GL_SCALE' "$F"
 
       - name: Watchdog also dumps the D3D device structure
