@@ -170,9 +170,9 @@ jobs:
           p = "config/namco/seed_functions.json"
           seeds = json.load(open(p)) if os.path.exists(p) else []
           have = {s["start"].lower() for s in seeds}
-          for addr, sec in [("0x005F92D1","XPP"),("0x005BDF6D","DSOUND"),("0x005BDF78","DSOUND"),
-                            ("0x005C2849","DSOUND"),("0x005C2854","DSOUND")]:
+          for addr, sec in [('0x005F92D1', 'XPP'), ('0x005BDF6D', 'DSOUND'), ('0x005BDF78', 'DSOUND'), ('0x005C2849', 'DSOUND'), ('0x005C2854', 'DSOUND'), ('0x00599660', '.text'), ('0x005AAC30', 'D3D'), ('0x005AAFA0', 'D3D'), ('0x005AAFE0', 'D3D'), ('0x005AB0A0', 'D3D'), ('0x005AB0E0', 'D3D'), ('0x005AB180', 'D3D'), ('0x005AB270', 'D3D'), ('0x005AB2F0', 'D3D'), ('0x005AB350', 'D3D'), ('0x005AB3A0', 'D3D'), ('0x005AB400', 'D3D'), ('0x005AB470', 'D3D'), ('0x005AC100', 'D3D'), ('0x005AC190', 'D3D'), ('0x005AC230', 'D3D'), ('0x005AC2A0', 'D3D'), ('0x005AC310', 'D3D'), ('0x005AC330', 'D3D'), ('0x005AC350', 'D3D'), ('0x005AC3B0', 'D3D'), ('0x005AC3F0', 'D3D'), ('0x005AC470', 'D3D'), ('0x005AC4C0', 'D3D'), ('0x005F7F18', 'XPP'), ('0x005F8950', 'XPP'), ('0x005F9F80', 'XPP')]:
               if addr.lower() not in have:
+                  have.add(addr.lower())
                   seeds.append({"start": addr, "note": sec + ". [ICALL] Failed to resolve on the iOS run."})
           os.makedirs("config/namco", exist_ok=True)
           json.dump(seeds, open(p, "w"), indent=1)
