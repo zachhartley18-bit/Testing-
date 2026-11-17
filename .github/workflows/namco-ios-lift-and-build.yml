@@ -342,7 +342,7 @@ jobs:
           cd "$SOURCE_DIR"
           F=src/ios_host.c
           # Placed before the app's own defaults, so these win; the settings file still overrides.
-          perl -0pi -e 's|(\s*SDL_SetHint\(SDL_HINT_ORIENTATIONS,)|\n    setenv("RECOMP_KERNEL_LOG_BUDGET", "6000", 0);   /* keep return addresses of the stalled loop */\n    setenv("RECOMP_GL_SCALE", "1.0", 0);             /* less GPU heat while bringing the game up */\n    setenv("RECOMP_WATCHDOG_SECS", "8", 0);          /* one snapshot of the guest call stack */\n    setenv("RECOMP_WATCHDOG_KEEP", "1", 0);          /* snapshot only: without this the watchdog calls _exit(3) after dumping */$1|' "$F"
+          perl -0pi -e 's|(\s*SDL_SetHint\(SDL_HINT_ORIENTATIONS,)|\n    setenv("RECOMP_KERNEL_LOG_BUDGET", "6000", 0);   /* keep return addresses of the stalled loop */\n    setenv("RECOMP_GL_SCALE", "1.0", 0);             /* less GPU heat while bringing the game up */\n    setenv("RECOMP_WATCHDOG_SECS", "8", 0);          /* one snapshot of the guest call stack */\n    setenv("RECOMP_WATCHDOG_KEEP", "1", 0);          /* snapshot only: without this the watchdog calls _exit(3) after dumping */\n    setenv("RECOMP_GL_FILL", "0", 0);                /* Namco draws its own 4:3 wallpaper; the Midnight Club 3 side fill garbles it */$1|' "$F"
           grep -q 'RECOMP_WATCHDOG_KEEP' "$F" || { echo "::error::diagnostic defaults were not inserted"; exit 1; }
           grep -n 'RECOMP_KERNEL_LOG_BUDGET\|RECOMP_GL_SCALE' "$F"
 
@@ -488,6 +488,18 @@ jobs:
                  "               : bytes_hash_full(va, tex_own_bytes(color, w, h, pitch, levels));\n")
           assert s.count(old) == 1, "texture hash block not found"
           s = s.replace(old, new)
+          old2 = ("    if (t)\n        t->rewrites++;                       /* same image, new content */\n")
+          new2 = ("    if (t) {\n"
+                  "        static unsigned rw_log;\n"
+                  "        if (rw_log++ < 60)\n"
+                  "            fprintf(stderr, \"  [GL] texture 0x%08X fmt 0x%02X %ux%u content changed (hash %08X -> %08X)\\n\", va, color, w, h, t->hash, hash);\n"
+                  "        t->rewrites++;                       /* same image, new content */\n"
+                  "    }\n")
+          assert s.count(old2) == 1, "rewrite line not found"
+          s = s.replace(old2, new2)
+          s = s.replace('tex_sampled = e && e[0] == \'1\'; }',
+                        'tex_sampled = e && e[0] == \'1\'; fprintf(stderr, "  [GL] texture change check: %s\\n", tex_sampled ? "sampled" : "full hash (Namco)"); }')
+          assert "full hash (Namco)" in s
           if "#include <stdlib.h>" not in s:
               s = "#include <stdlib.h>\n" + s
           open(p, "w").write(s)
