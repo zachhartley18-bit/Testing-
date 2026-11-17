@@ -187,7 +187,7 @@ jobs:
           p = "config/namco/seed_functions.json"
           seeds = json.load(open(p)) if os.path.exists(p) else []
           have = {s["start"].lower() for s in seeds}
-          for addr, sec in [("0x005B0EB0", "D3D GPU interrupt service routine (KeConnectInterrupt vector 3)"), ("0x005BEB49", "DSOUND interrupt service routine (vector 5)"), ("0x005C3EA1", "DSOUND/APU interrupt service routine (vector 6)"), ('0x005F92D1', 'XPP'), ('0x005BDF6D', 'DSOUND'), ('0x005BDF78', 'DSOUND'), ('0x005C2849', 'DSOUND'), ('0x005C2854', 'DSOUND'), ('0x00599660', '.text'), ('0x005AAC30', 'D3D'), ('0x005AAFA0', 'D3D'), ('0x005AAFE0', 'D3D'), ('0x005AB0A0', 'D3D'), ('0x005AB0E0', 'D3D'), ('0x005AB180', 'D3D'), ('0x005AB270', 'D3D'), ('0x005AB2F0', 'D3D'), ('0x005AB350', 'D3D'), ('0x005AB3A0', 'D3D'), ('0x005AB400', 'D3D'), ('0x005AB470', 'D3D'), ('0x005AC100', 'D3D'), ('0x005AC190', 'D3D'), ('0x005AC230', 'D3D'), ('0x005AC2A0', 'D3D'), ('0x005AC310', 'D3D'), ('0x005AC330', 'D3D'), ('0x005AC350', 'D3D'), ('0x005AC3B0', 'D3D'), ('0x005AC3F0', 'D3D'), ('0x005AC470', 'D3D'), ('0x005AC4C0', 'D3D'), ('0x005F7F18', 'XPP'), ('0x005F8950', 'XPP'), ('0x005F9F80', 'XPP'), ('0x005F9674', 'XPP')]:
+          for addr, sec in [("0x005B0EB0", "D3D GPU interrupt service routine (KeConnectInterrupt vector 3)"), ("0x005BEB49", "DSOUND interrupt service routine (vector 5)"), ("0x005C3EA1", "DSOUND/APU interrupt service routine (vector 6)"), ('0x005F92D1', 'XPP'), ('0x005BDF6D', 'DSOUND'), ('0x005BDF78', 'DSOUND'), ('0x005C2849', 'DSOUND'), ('0x005C2854', 'DSOUND'), ('0x00599660', '.text'), ('0x005AAC30', 'D3D'), ('0x005AAFA0', 'D3D'), ('0x005AAFE0', 'D3D'), ('0x005AB0A0', 'D3D'), ('0x005AB0E0', 'D3D'), ('0x005AB180', 'D3D'), ('0x005AB270', 'D3D'), ('0x005AB2F0', 'D3D'), ('0x005AB350', 'D3D'), ('0x005AB3A0', 'D3D'), ('0x005AB400', 'D3D'), ('0x005AB470', 'D3D'), ('0x005AC100', 'D3D'), ('0x005AC190', 'D3D'), ('0x005AC230', 'D3D'), ('0x005AC2A0', 'D3D'), ('0x005AC310', 'D3D'), ('0x005AC330', 'D3D'), ('0x005AC350', 'D3D'), ('0x005AC3B0', 'D3D'), ('0x005AC3F0', 'D3D'), ('0x005AC470', 'D3D'), ('0x005AC4C0', 'D3D'), ('0x005F7F18', 'XPP'), ('0x005F8950', 'XPP'), ('0x005F9F80', 'XPP'), ('0x005F9674', 'XPP'), ('0x005B15F0', 'D3D PGRAPH interrupt handler'), ('0x005B0FD0', 'D3D flip retirement'), ('0x005B0EA0', 'D3D'), ('0x005B1360', 'D3D pushbuffer callback')]:
               if addr.lower() not in have:
                   have.add(addr.lower())
                   seeds.append({"start": addr, "note": sec + ". [ICALL] Failed to resolve on the iOS run."})
@@ -229,6 +229,61 @@ jobs:
           CEOF
           fi
           grep -c sub_005AED70_gen "$m"
+
+      - name: Pace flips and acknowledge GPU traps like the Midnight Club 3 project
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          m=src/games/namco/recomp_manual.c
+          if ! grep -q "sub_005B0FD0_gen" "$m"; then
+            cat >> "$m" <<'CEOF'
+
+          /* D3D PGRAPH interrupt handler 0x005B15F0: reads PGRAPH_INTR/NSOURCE and
+           * hands a trapped software method to the pushbuffer callback 0x005B1360.
+           * It acknowledges by writing the status back, which does nothing on the
+           * plain memory here, so the trap stayed visible and the callback ran again
+           * and again: flip targets ended up hundreds of thousands of vblanks ahead
+           * of the real vblank count (dev+0x2588 = 0x3D452 against 0x1DF7) and the
+           * device re-creation at game start then waited forever for them to retire.
+           * Same cure as the Midnight Club 3 project: run under the executor's trap
+           * lock and report a trap found as taken. */
+          extern void nv2a_pb_trap_lock(void);
+          extern void nv2a_pb_trap_unlock(void);
+          extern void nv2a_pb_trap_taken(void);
+          extern void sub_005B15F0_gen(void);
+          void sub_005B15F0(void)
+          {
+              uint32_t nsource;
+              nv2a_pb_trap_lock();
+              nsource = MEM32(0xFD400108u);
+              sub_005B15F0_gen();
+              if (nsource)
+                  nv2a_pb_trap_taken();
+              nv2a_pb_trap_unlock();
+          }
+
+          /* D3D flip retirement 0x005B0FD0 (thiscall, called from the vblank DPC):
+           * retires the flips whose target vblank has come and returns how many.
+           * Reporting them lets the executor's FLIP_STALL wait for D3D like the real
+           * GPU, which keeps the title at the display rate instead of far ahead of it
+           * (also the likely cause of the heat). NAMCO_FLIP_PACE=0 turns it off. */
+          extern void nv2a_pb_flip_retired(unsigned n);
+          extern void sub_005B0FD0_gen(void);
+          void sub_005B0FD0(void)
+          {
+              static int on = -1;
+              if (on < 0) {
+                  const char *e = getenv("NAMCO_FLIP_PACE");
+                  on = !(e && e[0] == '0');
+              }
+              sub_005B0FD0_gen();
+              if (on)
+                  nv2a_pb_flip_retired(g_eax);
+          }
+          CEOF
+          fi
+          grep -c "sub_005B0FD0_gen\|sub_005B15F0_gen" "$m"
 
       - name: Lift the Xbox executable with the project's own lifter
         shell: bash
