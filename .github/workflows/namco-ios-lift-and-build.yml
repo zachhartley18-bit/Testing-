@@ -357,10 +357,10 @@ jobs:
           s = open(p).read()
           pat = re.compile(r"if \(keep && \*keep == '1'\) \{\s*fflush\(stderr\);\s*return 0;\s*\}")
           new = ("if (keep && *keep == '1') {\n"
-                 "            /* Namco iOS: a freeze after the first snapshot needs its own stack,\n"
-                 "             * so keep sampling every 10 s (20 samples). */\n"
+                 "            /* Namco iOS: a freeze can come minutes in, so keep sampling\n"
+                 "             * every 10 s for the whole run. */\n"
                  "            int n;\n"
-                 "            for (n = 0; n < 20; n++) {\n"
+                 "            for (n = 0; n < 100000; n++) {\n"
                  "                Sleep(10000);\n"
                  "                xbox_WatchdogDump(\"periodic\");\n"
                  "            }\n"
@@ -444,11 +444,55 @@ jobs:
                           g_dpc_queue[i].dpc ? BRIDGE_MEM32(g_dpc_queue[i].dpc + 12) : 0);
               fprintf(stderr, "\n  vblanks delivered=%ld\n", (long)s_vb_count);
               fflush(stderr);
+              {   extern void xbox_IrqlDumpHolders(void);
+                  xbox_IrqlDumpHolders(); }
           }
           '''
               open(kb, "w").write(k)
               print("gil report appended")
+          # name the function a raised thread came from, when the binary has symbols
+          kh = "xboxrecomp/src/kernel/kernel_hal.c"
+          h = open(kh).read()
+          oldh = 'fprintf(stderr, "  [IRQLHOLD]   tid %lu raised from host %p\\n",\n                    (unsigned long)t, s_holders[i].ra);'
+          newh = ('{ Dl_info di; const char *nm = "?";\n'
+                  '              if (dladdr(s_holders[i].ra, &di) && di.dli_sname) nm = di.dli_sname;\n'
+                  '              fprintf(stderr, "  [IRQLHOLD]   tid %lu raised from host %p (%s)\\n",\n'
+                  '                      (unsigned long)t, s_holders[i].ra, nm); }')
+          assert h.count(oldh) == 1, "IRQLHOLD line not found"
+          h = h.replace(oldh, newh)
+          if "#include <dlfcn.h>" not in h:
+              h = "#include <dlfcn.h>\n" + h
+          open(kh, "w").write(h)
+          print("irql holder names patched")
           EOF
+
+      - name: Hash every texture in full so reused texture memory is never shown stale
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          python3 - <<'PYEOF'
+          p = "xboxrecomp/src/nv2a_gl/nv2a_gl.c"
+          s = open(p).read()
+          old = ("    hash = tex_size_from_format(color) && !(t && t->rewrites)\n"
+                 "               ? bytes_hash(va, tex_own_bytes(color, w, h, pitch, levels))\n"
+                 "               : bytes_hash_full(va, tex_own_bytes(color, w, h, pitch, levels));\n")
+          new = ("    /* Namco iOS: the game streams new images into texture memory it\n"
+                 "     * already used. The sampled hash (256 words) misses a changed image\n"
+                 "     * that keeps those words, and the old texture is drawn. Hash every\n"
+                 "     * byte; NAMCO_TEX_SAMPLED=1 restores the cheap check. */\n"
+                 "    static int tex_sampled = -1;\n"
+                 "    if (tex_sampled < 0) { const char *e = getenv(\"NAMCO_TEX_SAMPLED\"); tex_sampled = e && e[0] == '1'; }\n"
+                 "    hash = tex_sampled && tex_size_from_format(color) && !(t && t->rewrites)\n"
+                 "               ? bytes_hash(va, tex_own_bytes(color, w, h, pitch, levels))\n"
+                 "               : bytes_hash_full(va, tex_own_bytes(color, w, h, pitch, levels));\n")
+          assert s.count(old) == 1, "texture hash block not found"
+          s = s.replace(old, new)
+          if "#include <stdlib.h>" not in s:
+              s = "#include <stdlib.h>\n" + s
+          open(p, "w").write(s)
+          print("texture hash patched")
+          PYEOF
 
       - name: Build Namco Museum for iOS
         shell: bash
