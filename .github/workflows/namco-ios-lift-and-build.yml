@@ -408,12 +408,46 @@ jobs:
                           *(const uint32_t *)(mem + dev + 0x257C), *(const uint32_t *)(mem + dev + 0x2534),
                           *(const uint32_t *)(mem + dev + 0x2540));
                   {   uint32_t pb = *(const uint32_t *)(mem + dev + 0x34);
-                      fprintf(stderr, "  D3D *[dev+34]=%08X\n", pb < 0x10000000u ? *(const uint32_t *)(mem + pb) : 0xDEADBEEFu); }
+                      fprintf(stderr, "  D3D *[dev+34]=%08X\n",
+                              (pb < 0x10000000u || (pb >= 0x80000000u && pb < 0x84000000u))
+                                  ? *(const uint32_t *)(mem + pb) : 0xDEADBEEFu); }
+                  fprintf(stderr, "  vsync tick 0x007522FC=%08X\n", *(const uint32_t *)(mem + 0x7522FC));
+                  {   extern void xbox_debug_gil_report(void);
+                      xbox_debug_gil_report(); }
               }
           }
           '''
           open(p, "w").write(s.replace(anchor, dump))
           print("watchdog device dump inserted")
+          kb = "xboxrecomp/src/kernel/kernel_bridge.c"
+          k = open(kb).read()
+          if "xbox_debug_gil_report" not in k:
+              k += r'''
+
+          /* Namco iOS diagnostic: who holds the guest lock, who waits for it, and what
+           * is queued, for the watchdog's snapshot of a frozen game. */
+          void xbox_debug_gil_report(void)
+          {
+              LONG i;
+              int p;
+              fprintf(stderr, "  GIL holder tid=%lu label=%s next=%llu serving=%llu main tid=%lu waiters/prio:",
+                      (unsigned long)s_gil_holder_tid,
+                      s_gil_holder_label ? s_gil_holder_label : "-",
+                      (unsigned long long)s_gil_next, (unsigned long long)s_gil_serving,
+                      (unsigned long)s_gil_main_tid);
+              for (p = 0; p < GIL_PRIOS; p++)
+                  fprintf(stderr, " %d", s_gil_waiting[p]);
+              fprintf(stderr, "\n  DPC queue head=%ld tail=%ld lock=%ld:", (long)g_dpc_head, (long)g_dpc_tail,
+                      (long)g_dpc_lock);
+              for (i = g_dpc_head; i != g_dpc_tail && i != g_dpc_head + 8; i = (i + 1) % XBOX_MAX_PENDING_DPC)
+                  fprintf(stderr, " %08X(routine %08X)", g_dpc_queue[i].dpc,
+                          g_dpc_queue[i].dpc ? BRIDGE_MEM32(g_dpc_queue[i].dpc + 12) : 0);
+              fprintf(stderr, "\n  vblanks delivered=%ld\n", (long)s_vb_count);
+              fflush(stderr);
+          }
+          '''
+              open(kb, "w").write(k)
+              print("gil report appended")
           EOF
 
       - name: Build Namco Museum for iOS
