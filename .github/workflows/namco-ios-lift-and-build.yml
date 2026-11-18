@@ -500,6 +500,19 @@ jobs:
           s = s.replace('tex_sampled = e && e[0] == \'1\'; }',
                         'tex_sampled = e && e[0] == \'1\'; fprintf(stderr, "  [GL] texture change check: %s\\n", tex_sampled ? "sampled" : "full hash (Namco)"); }')
           assert "full hash (Namco)" in s
+          # Test: the game's 640x480 CPU-drawn frame is a 16-bit A1R5G5B5 image whose
+          # alpha bit is probably 0 on black/background pixels; the blend then lets the
+          # menu behind it show through. Make that one image opaque (NAMCO_OPAQUE_FRAME=0 off).
+          old3 = ("    } else if (s_decode && (color == 0x0B ? decode_indexed(va, w, h, s_decode)\n"
+                  "                                    : nv2a_backend_decode_texture(&nt, s_decode))) {\n")
+          new3 = old3 + ("        if (color == 0x10 && w == 640 && h == 480) {\n"
+                         "            static int opq = -1; size_t k;\n"
+                         "            if (opq < 0) { const char *e = getenv(\"NAMCO_OPAQUE_FRAME\"); opq = !(e && e[0] == '0');\n"
+                         "                fprintf(stderr, \"  [GL] 640x480 A1R5G5B5 frame forced opaque: %s\\n\", opq ? \"on\" : \"off\"); }\n"
+                         "            if (opq) for (k = 0; k < (size_t)w * h; k++) s_decode[k] |= 0xFF000000u;\n"
+                         "        }\n")
+          assert s.count(old3) == 1, "generic decode branch not found"
+          s = s.replace(old3, new3)
           if "#include <stdlib.h>" not in s:
               s = "#include <stdlib.h>\n" + s
           open(p, "w").write(s)
