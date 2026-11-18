@@ -342,7 +342,7 @@ jobs:
           cd "$SOURCE_DIR"
           F=src/ios_host.c
           # Placed before the app's own defaults, so these win; the settings file still overrides.
-          perl -0pi -e 's|(\s*SDL_SetHint\(SDL_HINT_ORIENTATIONS,)|\n    setenv("RECOMP_KERNEL_LOG_BUDGET", "6000", 0);   /* keep return addresses of the stalled loop */\n    setenv("RECOMP_GL_SCALE", "1.0", 0);             /* less GPU heat while bringing the game up */\n    setenv("RECOMP_WATCHDOG_SECS", "8", 0);          /* one snapshot of the guest call stack */\n    setenv("RECOMP_WATCHDOG_KEEP", "1", 0);          /* snapshot only: without this the watchdog calls _exit(3) after dumping */\n    setenv("RECOMP_GL_FILL", "0", 0);                /* Namco draws its own 4:3 wallpaper; the Midnight Club 3 side fill garbles it */$1|' "$F"
+          perl -0pi -e 's|(\s*SDL_SetHint\(SDL_HINT_ORIENTATIONS,)|\n    setenv("RECOMP_KERNEL_LOG_BUDGET", "6000", 0);   /* keep return addresses of the stalled loop */\n    setenv("RECOMP_GL_SCALE", "1.0", 0);             /* less GPU heat while bringing the game up */\n    setenv("RECOMP_WATCHDOG_SECS", "8", 0);          /* one snapshot of the guest call stack */\n    setenv("RECOMP_WATCHDOG_KEEP", "1", 0);          /* snapshot only: without this the watchdog calls _exit(3) after dumping */\n    setenv("RECOMP_GL_THREAD", "0", 0);              /* the GL thread reads texture memory up to two frames late: torn, wrong-frame images from a title that redraws its own texture */\n    setenv("RECOMP_GL_FILL", "0", 0);                /* Namco draws its own 4:3 wallpaper; the Midnight Club 3 side fill garbles it */$1|' "$F"
           grep -q 'RECOMP_WATCHDOG_KEEP' "$F" || { echo "::error::diagnostic defaults were not inserted"; exit 1; }
           grep -n 'RECOMP_KERNEL_LOG_BUDGET\|RECOMP_GL_SCALE' "$F"
 
@@ -513,6 +513,26 @@ jobs:
                          "        }\n")
           assert s.count(old3) == 1, "generic decode branch not found"
           s = s.replace(old3, new3)
+          # Diagnostics for "the star background is missing on the first selection":
+          # log every new texture (first 800) and how much of the 640x480 frame is non-black.
+          old4 = ("    if (s_trace)\n"
+                  "        fprintf(stderr, \"  [GL] texture 0x%08X format 0x%02X %ux%u pitch %u\\n\",\n"
+                  "                va, color, w, h, pitch);\n")
+          new4 = ("    { static unsigned nt_log;\n"
+                  "      if (s_trace || nt_log++ < 800)\n"
+                  "        fprintf(stderr, \"  [GL] texture 0x%08X format 0x%02X %ux%u pitch %u (frame %u)\\n\",\n"
+                  "                va, color, w, h, pitch, (unsigned)s_frame); }\n")
+          assert s.count(old4) == 1, "texture trace site not found"
+          s = s.replace(old4, new4)
+          old5 = "            if (opq) for (k = 0; k < (size_t)w * h; k++) s_decode[k] |= 0xFF000000u;\n"
+          new5 = ("            { static unsigned fs_log; size_t nz = 0, nb = 0;\n"
+                  "              for (k = 0; k < (size_t)w * h; k++) { nz += (s_decode[k] & 0xFFFFFFu) != 0;\n"
+                  "                  nb += (s_decode[k] & 0xFFFFFFu) > 0x404040u; }\n"
+                  "              if (fs_log++ < 3000)\n"
+                  "                  fprintf(stderr, \"  [GL] frame 0x%08X @frame %u: %zu of %zu pixels non-black, %zu bright\\n\", va, (unsigned)s_frame, nz, (size_t)w * h, nb); }\n"
+                  + old5)
+          assert s.count(old5) == 1, "opaque line not found"
+          s = s.replace(old5, new5)
           if "#include <stdlib.h>" not in s:
               s = "#include <stdlib.h>\n" + s
           open(p, "w").write(s)
